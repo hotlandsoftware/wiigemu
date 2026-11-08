@@ -114,8 +114,8 @@ WiiExit wii_browser_run(const WiiMachine *m, bool can_go_back, const char **rom)
     snprintf(hint, sizeof(hint), "Put ROMs in gemu/%s/ on the SD card", m->name);
 #endif
     const bool only_builtin = n_roms == (m->builtin_label ? 1 : 0);
-    const char *footer = can_go_back ? "A:Run  B:Back  -:Rescan  HOME:Exit"
-                                     : "A:Run  -:Rescan  HOME:Exit";
+    const char *footer = can_go_back ? "A:Run  B:Back  " WII_KEY_MINUS ":Rescan  " WII_KEY_HOME ":Exit"
+                                     : "A:Run  " WII_KEY_MINUS ":Rescan  " WII_KEY_HOME ":Exit";
 
     for (;;) {
         WiiInput in = wii_input_poll(false);

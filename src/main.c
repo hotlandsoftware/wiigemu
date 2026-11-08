@@ -79,7 +79,7 @@ static const WiiMachine *pick_machine(WiiExit *why)
             .pre = "Welcome to ", .post = "!",
             .labels = labels, .n = N_MACHINES,
             .status = wii_error(), .status_error = true,
-            .footer = "A:Select  HOME:Exit",
+            .footer = "A:Select  " WII_KEY_HOME ":Exit",
         }, sel, top);
     }
 }

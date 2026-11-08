@@ -410,9 +410,9 @@ static void a26_menus(void *ud, GemuMenu *bar)
 
     GemuMenu *con = gemu_menu_add_submenu(bar, "Console");
     GemuMenuItem *it = gemu_menu_add(con, GEMU_MENU_ACTION, "Game Reset", press_switch, s, A26_ACT_RESET);
-    snprintf(it->shortcut, sizeof(it->shortcut), "+");
+    snprintf(it->shortcut, sizeof(it->shortcut), WII_KEY_PLUS);
     it = gemu_menu_add(con, GEMU_MENU_ACTION, "Game Select", press_switch, s, A26_ACT_SELECT);
-    snprintf(it->shortcut, sizeof(it->shortcut), "-");
+    snprintf(it->shortcut, sizeof(it->shortcut), WII_KEY_MINUS);
     gemu_menu_add_separator(con);
     radio(con, "Color", set_color, is_color, s, 1);
     radio(con, "B&W",   set_color, is_color, s, 0);

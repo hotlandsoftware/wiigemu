@@ -246,8 +246,8 @@ static void draw_game(void *ud)
 
     /* Hints: left of the keypad, right-aligned; right of it, left-aligned. */
     const int lx = kx - 16, rx = kx + KEYPAD_W + 16;
-    const char *left[]  = { "HOME", "Menu", m->paused_view ? "PAUSED" : NULL };
-    const char *right[] = { "-/+", m->keypad_focus ? "Unfocus" : "Focus",
+    const char *left[]  = { WII_KEY_HOME, "Menu", m->paused_view ? "PAUSED" : NULL };
+    const char *right[] = { WII_KEY_MINUS "/" WII_KEY_PLUS, m->keypad_focus ? "Unfocus" : "Focus",
                             m->keypad_focus ? "2:Press" : NULL };
     for (int i = 0; i < 3; i++) {
         int y = ky + 8 + i * 24;
@@ -306,7 +306,7 @@ static void input_items(void *ud, GemuMenu *input)
     GemuMenuItem *it = gemu_menu_add(input, GEMU_MENU_CHECK, "Focus keypad",
                                      keypad_toggle, ud, 0);
     it->checked = keypad_focused;
-    snprintf(it->shortcut, sizeof(it->shortcut), "-/+");
+    snprintf(it->shortcut, sizeof(it->shortcut), WII_KEY_MINUS "/" WII_KEY_PLUS);
 }
 
 /* ── Run loop ────────────────────────────────────────────────────────────── */

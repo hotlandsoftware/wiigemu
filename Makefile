@@ -149,8 +149,11 @@ $(TARGET).elf: $(OBJS)
 	@echo linking $@
 	@$(CC) $(LDFLAGS) $(OBJS) $(LIBDIRS) $(LIBS) -o $@
 
-# Flag changes rebuild everything.
-$(OBJS): Makefile
+# Flag changes rebuild everything: edits to this file, and DEFINES changing
+# between runs (e.g. EMBED=... on or off), recorded in $(BUILD)/defines.
+DEFS_STAMP := $(BUILD)/defines
+$(shell mkdir -p $(BUILD); echo '$(DEFINES)' | cmp -s - $(DEFS_STAMP) || echo '$(DEFINES)' > $(DEFS_STAMP))
+$(OBJS): Makefile $(DEFS_STAMP)
 
 # Sources may include generated data headers.
 $(addprefix $(BUILD)/,$(SRCS:.c=.o)): | $(DATA_HDRS)
