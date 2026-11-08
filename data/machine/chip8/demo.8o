@@ -1,0 +1,48 @@
+# GEMU for Wii - built-in CHIP-8 demo (Octo).
+#
+# Embedded in boot.dol and assembled at load time by GEMU's Octo compiler,
+# so the app does something with no SD card.  Also a smoke test for keypad
+# input, the delay timer and the beeper; it runs on desktop GEMU too
+# (gemu -M chip8 data/machine/chip8/demo.8o).
+#
+# A "GEMU" logo bounces around and beeps at each wall.  Keypad 2/4/6/8
+# steer it; 5 toggles the speed.
+
+: main
+  v0 := 16  v1 := 13  v2 := 1  v3 := 1  v7 := 2
+  draw-logo
+  loop
+    delay := v7
+    loop  v5 := delay  if v5 != 0 then  again
+    # Erase, move and redraw right after the timer tick, so the whole
+    # update lands within one 60 Hz frame (no flicker at 30 ins/frame).
+    draw-logo
+    v0 += v2  v1 += v3
+    draw-logo
+    v5 := 4  if v5 key then v2 := 255
+    v5 := 6  if v5 key then v2 := 1
+    v5 := 2  if v5 key then v3 := 255
+    v5 := 8  if v5 key then v3 := 1
+    v5 := 5  if v5 key begin
+      v6 := 3  v7 ^= v6            # 2 <-> 1 frames per step
+      loop  if v5 key then  again  # wait for release
+    end
+    v6 := 3
+    if v0 == 0  begin v2 := 1    buzzer := v6 end
+    if v0 == 32 begin v2 := 255  buzzer := v6 end
+    if v1 == 0  begin v3 := 1    buzzer := v6 end
+    if v1 == 27 begin v3 := 255  buzzer := v6 end
+  again
+
+: draw-logo
+  v4 := v0
+  i := letter-g  sprite v4 v1 5  v4 += 8
+  i := letter-e  sprite v4 v1 5  v4 += 8
+  i := letter-m  sprite v4 v1 5  v4 += 8
+  i := letter-u  sprite v4 v1 5
+;
+
+: letter-g 0x70 0x80 0xB0 0x90 0x70
+: letter-e 0xF0 0x80 0xE0 0x80 0xF0
+: letter-m 0x88 0xD8 0xA8 0x88 0x88
+: letter-u 0x90 0x90 0x90 0x90 0x60

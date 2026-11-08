@@ -1,0 +1,10 @@
+gemu/
+build/
+build-autotest/
+dist/
+*.elf
+*.dol
+.dolphin/
+sd/
+roms/
+build-host/

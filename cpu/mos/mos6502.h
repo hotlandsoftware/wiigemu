@@ -1,0 +1,64 @@
+#pragma once
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+/* Status register (P) bits: NV-BDIZC */
+#define MOS6502_P_C  0x01u  /* Carry */
+#define MOS6502_P_Z  0x02u  /* Zero */
+#define MOS6502_P_I  0x04u  /* Interrupt disable */
+#define MOS6502_P_D  0x08u  /* Decimal */
+#define MOS6502_P_B  0x10u  /* Break (set on push; not stored in live P) */
+#define MOS6502_P_U  0x20u  /* Unused - always reads 1 */
+#define MOS6502_P_V  0x40u  /* Overflow */
+#define MOS6502_P_N  0x80u  /* Negative */
+
+typedef struct Mos6502 {
+    uint8_t  A;     /* Accumulator */
+    uint8_t  X;     /* X index register */
+    uint8_t  Y;     /* Y index register */
+    uint8_t  SP;    /* Stack pointer (hardware stack is 0x0100–0x01FF) */
+    uint16_t PC;    /* Program counter */
+    uint8_t  P;     /* Status flags (NV-BDIZC) */
+
+    uint64_t cycle_count;
+    uint64_t insn_count;
+
+    uint8_t (*mem_read) (uint16_t addr, void *ud);
+    void    (*mem_write)(uint16_t addr, uint8_t val, void *ud);
+    void    *mem_ud;
+
+    bool irq;             /* level-sensitive: true = IRQ line asserted */
+    bool nmi;             /* edge-triggered: set to true to request NMI */
+    bool decimal_disable; /* true = ignore D flag in ADC/SBC (Ricoh 2A03 behaviour) */
+
+    uint16_t addr_mask;   /* address pins present: 0xFFFF, or 0x1FFF on a 6507 */
+    bool no_int_pins;     /* 6507: no IRQ/NMI pins, so irq/nmi are ignored */
+    bool dummy_cycles;    /* perform the dummy bus reads of page-crossing and
+                             taken-branch cycles instead of only counting them
+                             (bank-switching hotspots can see them) */
+    uint16_t dummy_addr;  /* internal: address of the next dummy read */
+    bool cycle_polling;   /* sample the NMI latch and /IRQ at the end of every
+                             cycle and act on the penultimate cycle's sample, as
+                             the 6502 does: CLI/SEI/PLP take effect one
+                             instruction late, an NMI late in an instruction
+                             waits for the next, and an NMI during a BRK or IRQ
+                             sequence takes over its vector (the NES) */
+    bool poll_nmi[2], poll_irq[2];   /* internal: [0] last cycle, [1] the one before */
+    bool rdy_halted;      /* set by the machine when RDY held the CPU (a DMA) during a read */
+} Mos6502;
+
+void mos6502_init (Mos6502 *cpu);
+void mos6502_reset(Mos6502 *cpu);
+void mos6502_step (Mos6502 *cpu);
+/* Disassembly (mos6502_dis.c).  The symbol callback may name an operand
+ * address; access says how the instruction uses it.  Returns the
+ * instruction's length in bytes. */
+enum { MOS6502_SYM_CODE, MOS6502_SYM_READ, MOS6502_SYM_WRITE };
+typedef uint8_t     (*Mos6502PeekFn)(void *ud, uint16_t addr);
+typedef const char *(*Mos6502SymFn)(void *ud, uint16_t addr, int access);
+int  mos6502_disasm(Mos6502PeekFn peek, void *ud, uint16_t pc, char *buf, size_t len,
+                    Mos6502SymFn sym, void *sym_ud);
+int  mos6502_insn_len(uint8_t opcode);
+/* One-line register dump for the monitor's "info cpu". */
+void mos6502_format_state(const Mos6502 *cpu, char *buf, size_t len);

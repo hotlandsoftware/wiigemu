@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app version="1">
+  <name>GEMU</name>
+  <coder>Hotlands Software</coder>
+  <version>0.0.1A</version>
+  <release_date>20261106000000</release_date>
+  <short_description>A multi-machine emulator</short_description>
+  <long_description>This is a port of GEMU ("Generic EMUlator") to the Nintendo Wii.
+GEMU is a multi-machine emulator with the goal of emulating different machines and devices as accurately and thoroughly as possible. 
+Some machines emulated by GEMU may be unavailable due to the limitations of the Wii hardware.
+</long_description>
+  <ahb_access/>
+</app>
