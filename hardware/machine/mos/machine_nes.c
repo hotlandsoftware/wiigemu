@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define NES_CPU_HZ    1789773.0
+#define NES_CPU_CYCLES_PER_FRAME 29780.5    /* NTSC: 60.10 frames a second */
+
 typedef enum { SHAPE_TV, SHAPE_SQUARE, SHAPE_STRETCH } Shape;
 
 /* NesState comes first, so the API's pointer is also a NesWii *. */
@@ -44,6 +47,8 @@ typedef struct {
     uint32_t  shown_loop, shown_present, shown_run, shown_queue;
     uint32_t  iters, ips;
     uint32_t  underruns0, shown_underruns;
+    bool      skip;             /* one frame per vblank doesn't fit: two per pass */
+    int       last_run;
 } NesWii;
 
 /* ── Battery-backed PRG RAM: <rom without extension>.sav ─────────────────── */
@@ -129,6 +134,12 @@ NesState *nes_create(const MosConfig *cfg)
         return NULL;
     }
     nes_core_init(s, &w->cfg);
+    /* Sound 0.27% slow on a 59.94 Hz TV, so one frame per vblank (60.10 Hz)
+     * makes exactly what is played and the queue holds without catch-up
+     * frames (which need two frames to fit a vblank).  50 Hz TVs: as is,
+     * catching up. */
+    float ratio = wii_video_refresh_hz() / (float)(NES_CPU_HZ / NES_CPU_CYCLES_PER_FRAME);
+    if (s->apu.audio_dev && ratio > 0.99f && ratio < 1.01f) sdl_audio_wii_set_speed(ratio);
     sav_load(s);
 #ifdef GEMU_WII_AUTOTEST
     load_test_state(s);
@@ -210,6 +221,15 @@ static Layout layout(NesWii *w)
     return l;
 }
 
+/* Every word of these framebuffer rows is about to be written: claim
+ * their cache lines without reading them from memory first (dcbz), which
+ * otherwise costs as much as the drawing.  Rows are whole lines. */
+static inline void claim_rows(uint32_t *row, int words)
+{
+    for (char *p = (char *)row, *e = (char *)(row + words); p < e; p += 32)
+        __asm__ volatile("dcbz 0,%0" : : "r"(p) : "memory");
+}
+
 /* While the game runs: NES pixels straight to framebuffer words (two
  * screen pixels each), no canvas. */
 static void draw_direct(NesWii *w)
@@ -217,9 +237,11 @@ static void draw_direct(NesWii *w)
     const Layout l = layout(w);
     const int wpr = l.W / 2;                 /* words per framebuffer row */
     uint32_t *fb = wii_video_direct();
+    const bool claim = ((uintptr_t)fb & 31) == 0 && (wpr & 7) == 0;
     const uint32_t black = wii_video_yuyv(WII_COL_BLACK, WII_COL_BLACK);
     for (int y = 0; y < l.y0; y++) {
         uint32_t *r = fb + (size_t)y * wpr, *r2 = fb + (size_t)(l.H - 1 - y) * wpr;
+        if (claim) { claim_rows(r, wpr); claim_rows(r2, wpr); }
         for (int x = 0; x < wpr; x++) r[x] = r2[x] = black;
     }
     const int bx = l.x0 / 2, pw2 = l.pw / 2;
@@ -228,6 +250,7 @@ static void draw_direct(NesWii *w)
         const uint8_t *src = w->s.ppu.pixels + (size_t)(l.top + y) * RP2C02_WIDTH;
         uint32_t *row = fb + (size_t)(l.y0 + y * l.sy) * wpr;
         uint32_t *row2 = l.sy > 1 ? row + wpr : row;     /* the line's second screen row */
+        if (claim) claim_rows(row, (int)(row2 - row) + wpr);
         for (int x = 0; x < bx; x++) row[x] = row2[x] = black;
         uint32_t *d = row + bx, *d2 = row2 + bx;
         const uint32_t *yuyv = w->yuyv;
@@ -359,22 +382,42 @@ static void menu_reset(void *ud)
  * 60.10 Hz is all but the Wii's 59.94), nudged by the audio queue - 2
  * frames when it is under one hardware buffer, none when it is more than
  * ~4 frames ahead, which also absorbs the 0.3% difference.  Without audio,
- * the frame's real duration paces it. */
+ * the frame's real duration paces it.
+ *
+ * When one frame and its picture don't fit in a vblank (heavy scenes on
+ * the GameCube), passes run two frames and show the second - frame skip,
+ * the game keeping its speed - until the slowest of the last 60 frames
+ * plus the drawing would fit again, with SKIP_MARGIN_US to spare. */
 #define FRAME_SAMPLES (APU2A03_SAMPLE_RATE / 60u)
 #define QUEUE_LOW     SDL_AUDIO_WII_CHUNK
 #define QUEUE_HIGH    (SDL_AUDIO_WII_CHUNK + 4u * FRAME_SAMPLES)
-#define MAX_FRAMES_PER_VBLANK 2
-#define NES_CPU_HZ    1789773.0
+#define MAX_FRAMES_PER_PASS 3
+#define SKIP_MARGIN_US 1500u
+
 
 static uint32_t queued_samples(const NesState *s)
 {
     return SDL_GetQueuedAudioSize(s->apu.audio_dev) / (uint32_t)sizeof(float);
 }
 
-static int frames_wanted(const NesState *s)
+/* vblanks: how many the previous pass (w->last_run frames) took. */
+static int frames_wanted(NesWii *w, int vblanks)
 {
-    uint32_t q = queued_samples(s);
-    return q < QUEUE_LOW ? 2 : q > QUEUE_HIGH ? 0 : 1;
+    const uint32_t budget = (uint32_t)(1e6f / wii_video_refresh_hz());
+    if (w->last_run == 1 && vblanks >= 2) {         /* a single frame didn't fit */
+        w->skip = true;
+        w->max_us = UINT32_MAX;                     /* until 60 more are measured */
+        w->emu_sum = w->emu_max = w->emu_n = 0;
+    } else if (w->skip && w->max_us < budget &&
+               w->max_us + w->draw_us + SKIP_MARGIN_US < budget) {
+        w->skip = false;
+    }
+    uint32_t q = queued_samples(&w->s);
+    int n;
+    if (w->skip) n = 2;
+    else         n = q < QUEUE_LOW ? 2 : 1;
+    if (q > QUEUE_HIGH) n--;
+    return n < 0 ? 0 : n > MAX_FRAMES_PER_PASS ? MAX_FRAMES_PER_PASS : n;
 }
 
 static void run_frame(NesWii *w)
@@ -414,9 +457,14 @@ void nes_run(NesState *s, const MosConfig *cfg)
 
     u64 t0 = gettime();
     uint64_t emu_cycles = 0;          /* emulated since t0, when there is no audio */
+    u32 retrace = wii_video_retraces();
 
     for (;;) {
         u64 l0 = gettime();
+        u32 now = wii_video_retraces();
+        int vblanks = (int)(now - retrace);
+        retrace = now;
+        if (vblanks < 1) vblanks = 1;
         WiiInput in = wii_input_poll(true);
         WiiExit sys = wii_system_exit_requested();
         if (sys != WII_EXIT_NONE) { wii_request_exit(sys); break; }
@@ -426,6 +474,7 @@ void nes_run(NesState *s, const MosConfig *cfg)
             WiiExit leave = wii_menubar_open(menubar);
             if (leave != WII_EXIT_NONE) { wii_request_exit(leave); break; }
             t0 = gettime(); emu_cycles = 0;
+            retrace = wii_video_retraces();
             continue;
         }
 
@@ -437,7 +486,7 @@ void nes_run(NesState *s, const MosConfig *cfg)
 #endif
         if (!paused) {
             w->n_run = 0;
-            int want = s->apu.audio_dev ? frames_wanted(s) : MAX_FRAMES_PER_VBLANK;
+            int want = s->apu.audio_dev ? frames_wanted(w, vblanks) : MAX_FRAMES_PER_PASS;
             for (int n = 0; n < want; n++) {
                 if (!s->apu.audio_dev) {
                     uint64_t real_us = ticks_to_microsecs(diff_ticks(t0, gettime()));
@@ -450,6 +499,7 @@ void nes_run(NesState *s, const MosConfig *cfg)
             }
         }
 
+        w->last_run = paused ? 0 : w->n_run;
         w->paused_view = wii_menubar_paused(menubar);
         u64 d0 = gettime();
         if (w->paused_view) draw_game(w);

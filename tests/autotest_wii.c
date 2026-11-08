@@ -11,8 +11,8 @@
  * then the NES: run the 2nd ROM (smb.nes, when staged), Start, run right
  * and jump, Video > Picture > Square pixels, ROM list, broken.nes, home.
  *
- * Presses are fed in as a sideways Wii Remote's raw buttons (see
- * wii_autotest_wpad), so they go through the real controller mapping.
+ * Presses are fed in as a sideways Wii Remote's raw buttons (GameCube: pad
+ * 1's; see wii_autotest_pad), so they go through the real controller mapping.
  *
  * Useful freeze points: 20 home screen, 45 ROM list, 140 game, 200 keypad focused, 330 key 6 held, 440 Machine menu, 515 Speed
  * submenu, 850 About box, 890 paused game, 1040 load error, 1070 home.
@@ -24,7 +24,10 @@
 #include "gemu/input_wii.h"
 
 #include <stddef.h>
+#include <gccore.h>
+#ifdef HW_RVL
 #include <wiiuse/wpad.h>
+#endif
 
 static const struct { int frame, len; uint32_t btn; } autotest_script[] = {
     {  24, 2, WII_BTN_DOWN },                               /* home: -> CHIP-8       */
@@ -100,20 +103,29 @@ static int autotest_frame;
 
 bool wii_autotest_frozen(void) { return autotest_frame >= AUTOTEST_STOP; }
 
-/* Logical button -> what a sideways Wii Remote sends for it. */
-static uint32_t to_wpad(uint32_t b)
+/* Logical button -> what a sideways Wii Remote (GameCube: a GC pad) sends. */
+static uint32_t to_raw(uint32_t b)
 {
-    static const struct { uint32_t btn, wpad; } map[] = {
+    static const struct { uint32_t btn, raw; } map[] = {
+#ifdef HW_RVL
         { WII_BTN_UP,     WPAD_BUTTON_RIGHT }, { WII_BTN_DOWN,  WPAD_BUTTON_LEFT },
         { WII_BTN_LEFT,   WPAD_BUTTON_UP },    { WII_BTN_RIGHT, WPAD_BUTTON_DOWN },
         { WII_BTN_ACCEPT, WPAD_BUTTON_2 },     { WII_BTN_BACK,  WPAD_BUTTON_1 },
         { WII_BTN_X,      WPAD_BUTTON_A },     { WII_BTN_Y,     WPAD_BUTTON_B },
         { WII_BTN_KEYPAD, WPAD_BUTTON_MINUS }, { WII_BTN_PAUSE, WPAD_BUTTON_HOME },
         { WII_BTN_MINUS,  WPAD_BUTTON_MINUS }, { WII_BTN_PLUS,  WPAD_BUTTON_PLUS },
+#else
+        { WII_BTN_UP,     PAD_BUTTON_UP },     { WII_BTN_DOWN,  PAD_BUTTON_DOWN },
+        { WII_BTN_LEFT,   PAD_BUTTON_LEFT },   { WII_BTN_RIGHT, PAD_BUTTON_RIGHT },
+        { WII_BTN_ACCEPT, PAD_BUTTON_A },      { WII_BTN_BACK,  PAD_BUTTON_B },
+        { WII_BTN_X,      PAD_BUTTON_X },      { WII_BTN_Y,     PAD_BUTTON_Y },
+        { WII_BTN_KEYPAD, PAD_TRIGGER_Z },     { WII_BTN_PAUSE, PAD_BUTTON_START },
+        { WII_BTN_MINUS,  PAD_BUTTON_Y },      { WII_BTN_PLUS,  PAD_BUTTON_X },
+#endif
     };
     uint32_t w = 0;
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
-        if (b & map[i].btn) w |= map[i].wpad;
+        if (b & map[i].btn) w |= map[i].raw;
     return w;
 }
 
@@ -133,4 +145,4 @@ static uint32_t script_buttons(void)
     return last = b;
 }
 
-uint32_t wii_autotest_wpad(void) { return to_wpad(script_buttons()); }
+uint32_t wii_autotest_pad(void) { return to_raw(script_buttons()); }

@@ -30,6 +30,7 @@ static volatile uint32_t ring_r, ring_w;      /* free-running indices */
 static int16_t           dma[N_CHUNKS][CHUNK] __attribute__((aligned(32)));
 static int               dma_next;
 static int               rate;
+static float             speed = 1.0f;
 static bool              open_dev, playing;
 static int16_t           last;               /* held on underrun to avoid clicks */
 volatile uint32_t        sdl_audio_wii_underruns;   /* buffers the ring couldn't fill */
@@ -67,12 +68,19 @@ SDL_AudioDeviceID SDL_OpenAudioDevice(const char *device, int iscapture,
         want->channels != 1 || want->callback)
         return 0;
     rate = want->freq;
+    speed = 1.0f;
     if (have) *have = *want;
     ring_r = ring_w = 0;
     last = 0;
     open_dev = true;
     playing = false;
     return 1;
+}
+
+void sdl_audio_wii_set_speed(float s)
+{
+    speed = s;
+    if (playing) ASND_ChangePitchVoice(VOICE, (s32)(rate * speed + 0.5f));
 }
 
 void SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on)
@@ -82,7 +90,7 @@ void SDL_PauseAudioDevice(SDL_AudioDeviceID dev, int pause_on)
         ASND_Pause(0);
         dma_next = 1;
         fill(dma[0]);
-        ASND_SetVoice(VOICE, VOICE_MONO_16BIT, rate, 0, dma[0], sizeof(dma[0]),
+        ASND_SetVoice(VOICE, VOICE_MONO_16BIT, (s32)(rate * speed + 0.5f), 0, dma[0], sizeof(dma[0]),
                       200, 200, voice_cb);         /* of 255: headroom vs. clipping */
         playing = true;
     } else if (pause_on && playing) {

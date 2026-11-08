@@ -75,7 +75,7 @@ static GemuMenu *build_bar(WiiMenubar *mb)
     if (mb->h.machine_items) mb->h.machine_items(mb->h.ud, m);
     gemu_menu_add_separator(m);
     gemu_menu_add(m, GEMU_MENU_ACTION, "Back to ROM list", do_leave, mb, WII_EXIT_TO_MENU);
-    gemu_menu_add(m, GEMU_MENU_ACTION, "Exit to Homebrew Channel", do_leave, mb, WII_EXIT_TO_LOADER);
+    gemu_menu_add(m, GEMU_MENU_ACTION, WII_LOADER_EXIT, do_leave, mb, WII_EXIT_TO_LOADER);
 
     GemuMenu *input = gemu_menu_add_submenu(bar, "Input");
     if (mb->h.input_items) mb->h.input_items(mb->h.ud, input);

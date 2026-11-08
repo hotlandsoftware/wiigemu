@@ -1,10 +1,8 @@
 gemu/
-build/
-build-autotest/
+build*/
 dist/
 *.elf
 *.dol
 .dolphin/
 sd/
 roms/
-build-host/

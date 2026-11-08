@@ -1,6 +1,9 @@
 # GEMU for Wii - build with devkitPPC + libogc (devkitPro "wii-dev").
 #
 #   make                  -> gemu.dol
+#   make PLATFORM=gc      -> gemu-gc.dol, the GameCube build (same code; ROMs
+#                            from an SD Gecko / SD2SP2; EMBED=dir bakes a
+#                            <machine>/<rom> tree into it, for Dolphin)
 #   make TARGETS="chip8"  -> choose machine families (default: all)
 #   make package          -> dist/apps/gemu/ for the Homebrew Channel
 #   make run              -> build and start in Dolphin (tools/run-dolphin.sh)
@@ -15,18 +18,30 @@ ifeq ($(strip $(DEVKITPPC)),)
 DEVKITPPC := $(DEVKITPRO)/devkitPPC
 endif
 
+PLATFORM ?= wii
+ifeq ($(PLATFORM),wii)
 include $(DEVKITPPC)/wii_rules
+SUFFIX   :=
+PLATLIBS := -lwiiuse -lbte
+else ifeq ($(PLATFORM),gc)
+include $(DEVKITPPC)/gamecube_rules
+SUFFIX   := -gc
+PLATLIBS :=
+else
+$(error PLATFORM must be wii or gc)
+endif
 
-TARGET  := gemu
-BUILD   := build
+TARGET  := gemu$(SUFFIX)
+BUILD   := build$(SUFFIX)
+.DEFAULT_GOAL := all
 TARGETS ?= chip8 mos
 GEMU    ?= gemu
 DEFINES :=
 
 ifneq ($(AUTOTEST),)
 DEFINES += -DGEMU_WII_AUTOTEST=$(AUTOTEST)
-BUILD   := build-autotest
-TARGET  := gemu-autotest
+BUILD   := build$(SUFFIX)-autotest
+TARGET  := gemu$(SUFFIX)-autotest
 endif
 
 # ── Sources ──────────────────────────────────────────────────────────────────
@@ -50,6 +65,18 @@ DATA :=
 
 ifneq ($(AUTOTEST),)
 SRCS += tests/autotest_wii.c
+endif
+
+# Files baked into the DOL as the read-only embed: device (core/src/embed_fs.c):
+# EMBED=dir holding <machine>/<rom>, listed as embed:/gemu/<machine>/.
+# Dolphin has no GameCube SD adapter, so that's how its GC runs get ROMs.
+ifneq ($(EMBED),)
+DEFINES += -DGEMU_EMBED
+SRCS    += core/src/embed_fs.c
+DATA    += $(BUILD)/embed.bin
+$(BUILD)/embed.bin: FORCE
+	@mkdir -p $(BUILD)
+	@python3 -I tools/pack_embed.py "$(EMBED)" $@
 endif
 
 # One block per machine family.
@@ -107,14 +134,14 @@ INCLUDES := -Icore/include -Icpu -Icpu/chip8 -Icpu/mos -Ivga -Ivga/x86 -Ivga/mul
             -Ihardware/machine -Ihardware/machine/chip8 -Ihardware/machine/mos -Isrc \
             -Icompat \
             -I$(BUILD)/data \
-            -I$(LIBOGC_INC) -I$(PORTLIBS_PATH)/wii/include -I$(PORTLIBS_PATH)/ppc/include
+            -I$(LIBOGC_INC) $(foreach d,$(PORTLIBS),-I$(d)/include)
 CFLAGS   := -O2 -g -Wall -Wextra -Wno-unused-parameter -std=gnu11 \
             $(MACHDEP) $(DEFINES) $(INCLUDES) -MMD -MP
 LDFLAGS  := -g $(MACHDEP) -Wl,-Map,$(BUILD)/$(TARGET).map
-LIBDIRS  := -L$(LIBOGC_LIB) -L$(PORTLIBS_PATH)/wii/lib -L$(PORTLIBS_PATH)/ppc/lib
-LIBS     := -lfat -lasnd -lwiiuse -lbte -logc -lm
+LIBDIRS  := -L$(LIBOGC_LIB) $(foreach d,$(PORTLIBS),-L$(d)/lib)
+LIBS     := -lfat -lasnd $(PLATLIBS) -logc -lm
 
-.PHONY: all package run clean check-upstream test-a26 test-nes
+.PHONY: all package run clean check-upstream test-a26 test-nes FORCE
 
 all: $(TARGET).dol
 
@@ -142,11 +169,19 @@ $(call data_base,$(1)).o $(call data_base,$(1)).h &: $(1)
 endef
 $(foreach f,$(DATA),$(eval $(call data_rule,$(f))))
 
+ifeq ($(PLATFORM),gc)
+package: $(TARGET).dol
+	@mkdir -p dist/gamecube
+	cp $(TARGET).dol dist/gamecube/gemu.dol
+	@echo "Copy dist/gamecube/gemu.dol to your SD card and start it from Swiss;"
+	@echo "ROMs go in gemu/<machine>/ on the same card."
+else
 package: $(TARGET).dol
 	@mkdir -p dist/apps/gemu
 	cp $(TARGET).dol dist/apps/gemu/boot.dol
 	cp packaging/hbc/meta.xml packaging/hbc/icon.png dist/apps/gemu/
 	@echo "Copy dist/apps/ to the root of your SD card."
+endif
 
 run:
 	tools/run-dolphin.sh
@@ -212,6 +247,8 @@ test-nes:
 	done; exit $$rc
 
 clean:
-	rm -rf build build-autotest build-host dist gemu.elf gemu.dol gemu-autotest.elf gemu-autotest.dol
+	rm -rf build build-autotest build-gc build-gc-autotest build-host dist \
+	    gemu.elf gemu.dol gemu-autotest.elf gemu-autotest.dol \
+	    gemu-gc.elf gemu-gc.dol gemu-gc-autotest.elf gemu-gc-autotest.dol
 
 -include $(DEPS)

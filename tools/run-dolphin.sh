@@ -7,6 +7,10 @@
 #                     (sd/gemu/<machine>/, machine chosen by extension);
 #                     everything in roms/ (or roms/<machine>/) is copied too
 #   --no-build        don't run make
+#   --gc              the GameCube build (gemu-gc.dol).  Dolphin has no GC SD
+#                     adapter, so the staged SD tree's gemu/ is baked into the
+#                     DOL instead (make EMBED=...); Dolphin runs it at the
+#                     GameCube's clock, so speeds are the real GC's.
 #   --hbc             boot the Homebrew Channel instead of gemu.dol, with GEMU
 #                     on the SD card (sd/apps/gemu/).  The first time, your
 #                     Dolphin NAND (which must have the HBC installed) is
@@ -30,15 +34,16 @@ USER_NAND=${XDG_DATA_HOME:-$HOME/.local/share}/dolphin-emu/Wii
 HBC_TITLE=000100014C554C5A          # "LULZ", the Homebrew Channel
 HBC_DIR=title/00010001/4c554c5a
 
-build=1 autotest= seconds=40 hbc= roms=()
+build=1 autotest= seconds=40 hbc= gc= roms=()
 for arg in "$@"; do
     case $arg in
         --no-build)    build= ;;
         --hbc)         hbc=1 ;;
+        --gc)          gc=1 ;;
         --autotest)    autotest=1 ;;
         --autotest=*)  autotest=${arg#*=} ;;
         --seconds=*)   seconds=${arg#*=} ;;
-        -h|--help)     sed -n '2,20s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,24s/^# \{0,1\}//p' "$0"; exit 0 ;;
         -*)            echo "unknown option: $arg" >&2; exit 2 ;;
         *)             roms+=("$arg") ;;
     esac
@@ -60,16 +65,28 @@ if [ -z "${DEVKITPRO:-}" ] && [ -f /etc/profile.d/devkit-env.sh ]; then
     # shellcheck disable=SC1091
     source /etc/profile.d/devkit-env.sh
 fi
+sfx=${gc:+-gc}
+[ -n "$gc" ] && [ -n "$hbc" ] && { echo "--hbc is Wii only" >&2; exit 2; }
 if [ -n "$autotest" ]; then
-    dol=$ROOT/gemu-autotest.dol profile=$ROOT/build-autotest/dolphin sd=$profile/sd
-    [ -n "$build" ] && { rm -rf "$ROOT/build-autotest/core" "$ROOT/build-autotest/hardware" \
-                                "$ROOT/build-autotest/tests"   # AUTOTEST=N is baked in
-                         make -C "$ROOT" --no-print-directory AUTOTEST="$autotest"; }
+    dol=$ROOT/gemu$sfx-autotest.dol profile=$ROOT/build$sfx-autotest/dolphin sd=$profile/sd
 else
-    dol=$ROOT/gemu.dol profile=$ROOT/.dolphin sd=$ROOT/sd
-    [ -n "$build" ] && make -C "$ROOT" --no-print-directory package
+    dol=$ROOT/gemu$sfx.dol profile=$ROOT/.dolphin sd=$ROOT/sd
 fi
-[ -f "$dol" ] || { echo "$dol missing (build first)" >&2; exit 1; }
+build_dol() {   # GameCube: after staging, since the SD tree goes into the DOL
+    [ -n "$build" ] || return 0
+    local mk=(make -C "$ROOT" --no-print-directory)
+    [ -n "$gc" ] && mk+=(PLATFORM=gc EMBED="$sd/gemu")
+    if [ -n "$autotest" ]; then
+        rm -rf "$ROOT/build$sfx-autotest/core" "$ROOT/build$sfx-autotest/hardware" \
+               "$ROOT/build$sfx-autotest/tests"   # AUTOTEST=N is baked in
+        "${mk[@]}" AUTOTEST="$autotest"
+    elif [ -n "$gc" ]; then
+        "${mk[@]}"
+    else
+        "${mk[@]}" package
+    fi
+}
+[ -z "$gc" ] && build_dol
 
 # ── SD card ──────────────────────────────────────────────────────────────────
 mkdir -p "$sd/apps/gemu" "$sd/gemu/chip8" "$sd/gemu/atari2600" "$sd/gemu/nes"
@@ -95,6 +112,8 @@ if [ -z "$autotest" ] && [ -d "$ROOT/roms" ]; then
     done < <(find "$ROOT/roms" -type f ! -name '.*' -print0)
     [ -n "${staged:-}" ] && echo "Staged $staged ROM(s) from roms/"
 fi
+[ -n "$gc" ] && build_dol
+[ -f "$dol" ] || { echo "$dol missing (build first)" >&2; exit 1; }
 
 # ── Dolphin profile ──────────────────────────────────────────────────────────
 mkdir -p "$profile/Config"
@@ -136,6 +155,8 @@ if [ -n "$autotest" ]; then
         Wiimote3 Source 0  Wiimote4 Source 0  BalanceBoard Source 0
 else
     set_ini "$cfg/WiimoteNew.ini" Wiimote1 "Options/Sideways Wiimote" True
+    # GameCube controller 1 plugged in (6 = standard controller)
+    [ -n "$gc" ] && set_ini "$cfg/Dolphin.ini" Core SIDevice0 6
 fi
 
 # ── Run ──────────────────────────────────────────────────────────────────────

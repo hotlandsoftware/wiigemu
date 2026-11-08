@@ -114,5 +114,5 @@ int main(int argc, char **argv)
     }
 
     wii_shutdown(why);
-    return 0;   /* back to the Homebrew Channel */
+    return 0;   /* back to the Homebrew Channel (GameCube: reset) */
 }

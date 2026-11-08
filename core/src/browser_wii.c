@@ -15,11 +15,6 @@
 
 #define MAX_ROMS 512
 
-/* Searched in order for every machine; "%s" is the machine name. */
-static const char *const rom_dir_fmts[] = {
-    "sd:/gemu/%s", "usb:/gemu/%s", "sd:/roms/%s", "usb:/roms/%s",
-};
-
 typedef struct {
     char *path;     /* NULL = built-in program */
     char *label;
@@ -73,9 +68,9 @@ static void scan(const WiiMachine *m)
 {
     clear_roms();
     if (m->builtin_label) add_rom(NULL, m->builtin_label);
-    for (size_t i = 0; i < sizeof(rom_dir_fmts) / sizeof(rom_dir_fmts[0]); i++) {
+    for (size_t i = 0; wii_rom_dirs[i]; i++) {
         char dir[128];
-        snprintf(dir, sizeof(dir), rom_dir_fmts[i], m->name);
+        snprintf(dir, sizeof(dir), wii_rom_dirs[i], m->name);
         scan_dir(m, dir);
     }
     if (wii_app_dir()[0]) scan_dir(m, wii_app_dir());
@@ -106,11 +101,18 @@ WiiExit wii_browser_run(const WiiMachine *m, bool can_go_back, const char **rom)
     bool status_err = wii_error()[0] != '\0';
     snprintf(status, sizeof(status), "%s",
              status_err ? wii_error() : wii_storage_ok() ? "" : "No SD/USB storage found");
+#ifdef HW_DOL
+    if (!status_err && !wii_storage_ok()) snprintf(status, sizeof(status), "No SD card found");
+#endif
     status_err = status_err || !wii_storage_ok();
     wii_clear_error();
 
     char hint[64];
+#ifdef HW_RVL
     snprintf(hint, sizeof(hint), "Put ROMs in sd:/gemu/%s/", m->name);
+#else
+    snprintf(hint, sizeof(hint), "Put ROMs in gemu/%s/ on the SD card", m->name);
+#endif
     const bool only_builtin = n_roms == (m->builtin_label ? 1 : 0);
     const char *footer = can_go_back ? "A:Run  B:Back  -:Rescan  HOME:Exit"
                                      : "A:Run  -:Rescan  HOME:Exit";

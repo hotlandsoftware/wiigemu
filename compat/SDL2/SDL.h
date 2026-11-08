@@ -19,6 +19,9 @@ typedef uint16_t SDL_AudioFormat;
 /* Wii: samples handed to the hardware per refill (see sdl_audio_wii.c). */
 #define SDL_AUDIO_WII_CHUNK 1024u
 extern volatile Uint32 sdl_audio_wii_underruns;   /* Wii: refills that ran dry */
+/* Wii: play the queue at speed x the rate it was opened with (e.g. to make
+ * one emulated frame per vblank exactly what the hardware consumes). */
+void sdl_audio_wii_set_speed(float speed);
 #define AUDIO_F32SYS   0x8120u      /* 32-bit float, native byte order */
 
 typedef void (*SDL_AudioCallback)(void *userdata, Uint8 *stream, int len);

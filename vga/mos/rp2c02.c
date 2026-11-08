@@ -492,6 +492,71 @@ static void sprite_eval_dot(Rp2c02 *ppu, int dot) {
     ppu->oamaddr = (uint8_t)next;
 }
 
+/* sprite_eval_dot() over dots [dot, end), all 65-255, with its state in
+ * locals; stops early, returning the dot, once every entry has been seen
+ * (the idle part is the caller's). */
+static int sprite_eval_span(Rp2c02 *ppu, int dot, int end) {
+    const unsigned d0 = (unsigned)ppu->scanline;
+    const unsigned h = (ppu->ppuctrl & PPUCTRL_SPR_8x16) ? 16u : 8u;
+#define IN_RANGE(v) ((unsigned)(d0 - (v)) < h)     /* spr_in_range(): 0 <= line - y < h */
+    const uint8_t *oam = ppu->oam;
+    uint8_t *oam2 = ppu->oam2;
+    unsigned a = ppu->oamaddr;
+    uint8_t es = ppu->eval_s;
+    unsigned slot = ppu->eval_slot, byte = ppu->eval_byte, ovf = ppu->eval_ovf_copy;
+    bool done = ppu->eval_done, spr0 = ppu->spr0_next;
+    uint8_t stat = 0;
+    for (; dot < end; dot++) {
+        if (dot == 65) { slot = byte = ovf = 0; done = spr0 = false; }
+        else if (done) break;
+        if (dot & 1) { es = oam[a]; continue; }
+        unsigned next;
+        const uint8_t v = es;
+        if (slot < 8) {
+            uint8_t *sl = &oam2[slot * 4];
+            if (byte == 0) {
+                sl[0] = v;
+                if (IN_RANGE(v)) {
+                    if (dot == 66) spr0 = true;
+                    byte = 1;
+                    next = a + 1;
+                } else {
+                    next = (a + 4) & 0x1FCu;
+                }
+            } else {
+                sl[byte] = v;
+                next = a + 1;
+                if (byte == 3) {
+                    if (!IN_RANGE(v)) next &= 0x1FCu;
+                    byte = 0;
+                    slot++;
+                } else {
+                    byte++;
+                }
+            }
+        } else if (ovf) {
+            next = a + 1;
+            if (--ovf == 0) done = true;
+        } else if (IN_RANGE(v)) {
+            stat |= PPUSTAT_SPR_OVF;
+            ovf = 3;
+            next = a + 1;
+        } else {
+            next = a + 5;
+        }
+        if (next > 0xFFu) done = true;
+        a = next & 0xFFu;
+    }
+#undef IN_RANGE
+    ppu->oamaddr = (uint8_t)a;
+    ppu->eval_s = es;
+    ppu->eval_slot = (uint8_t)slot; ppu->eval_byte = (uint8_t)byte;
+    ppu->eval_ovf_copy = (uint8_t)ovf;
+    ppu->eval_done = done; ppu->spr0_next = spr0;
+    ppu->ppustatus |= stat;
+    return dot;
+}
+
 static void load_sprite_shifters(Rp2c02 *ppu) {
     int target = ppu->scanline + 1;
     if (target >= ppu->lines_total) target = 0;
@@ -795,6 +860,19 @@ static void fetch_span(Rp2c02 *ppu, uint32_t m) {
     ppu->dot = dot;
 }
 
+/* spread[h][b]: bits 7-4 (h = 0) or 3-0 (h = 1) of b, one per byte, most
+ * significant byte first - a tile row's planes to one byte per pixel. */
+static uint32_t spread[2][256];
+
+static void init_spread(void) {
+    if (spread[0][0x80]) return;
+    for (int b = 0; b < 256; b++)
+        for (int j = 0; j < 4; j++) {
+            spread[0][b] |= (uint32_t)((b >> (7 - j)) & 1) << (24 - 8 * j);
+            spread[1][b] |= (uint32_t)((b >> (3 - j)) & 1) << (24 - 8 * j);
+        }
+}
+
 /* Visible line, rendering on: m dots from ppu->dot, all within 1-255.  The
  * dot-by-dot work of rp2c02_tick() there (background shifters and fetches,
  * sprite evaluation, the pixel, the sprite shifters), in the same order,
@@ -849,8 +927,83 @@ static void visible_span(Rp2c02 *ppu, uint32_t m) {
         }
     }
 
+    /* sprite_eval_dot() for the span's dots first: it only touches OAM,
+     * secondary OAM, its own state and the overflow flag, which nothing
+     * below reads (the CPU sees them after the span). */
+    const int end = dot0 + (int)m;
     int dot = dot0;
-    for (int end = dot + (int)m; dot < end; dot++) {
+    for (; dot < end && dot <= 64; dot++)                 /* clearing secondary OAM */
+        if (!(dot & 1)) ppu->oam2[(dot - 1) >> 1] = 0xFF;
+    if (dot < end) dot = sprite_eval_span(ppu, dot, end);
+    for (; dot < end; dot++) {                            /* every entry seen: idling */
+        if (dot & 1) ppu->eval_s = ppu->oam[ppu->oamaddr];
+        else         ppu->oamaddr = (uint8_t)(ppu->oamaddr + 4u);
+    }
+
+    /* Whole tiles (dots 8k+1 .. 8k+8) when nothing can watch the fetches
+     * and no clipping applies: the four fetches, then the eight pixels
+     * from an 8-bit window of the shifters. */
+    const bool tiles = page && ppu->chr_direct && show_bg;
+    const bool left_ok = bg_left && (spr_left || !show_spr);   /* tile 0: no clipping */
+    uint8_t pal16[16];
+    for (int i = 0; i < 16; i++) pal16[i] = pal[(i & 3) ? i : 0];
+    const unsigned wsh = fx - 7u;                         /* window: bits fx .. fx-7 */
+    init_spread();
+
+    dot = dot0;
+    while (dot < end) {
+        if (tiles && (dot & 7) == 1 && dot + 8 <= end && (dot > 8 || left_ok)) {
+            lo  = (uint16_t)(((lo  << 1) & 0xFF00u) | ppu->pt_lo_latch);
+            hi  = (uint16_t)(((hi  << 1) & 0xFF00u) | ppu->pt_hi_latch);
+            alo = (uint16_t)(((alo << 1) & 0xFF00u) | (ppu->at_latch_lo ? 0x00FFu : 0));
+            ahi = (uint16_t)(((ahi << 1) & 0xFF00u) | (ppu->at_latch_hi ? 0x00FFu : 0));
+            const uint16_t v = ppu->v;
+            const uint8_t nt = page[(v >> 10) & 3u][v & 0x3FFu];
+            ppu->nt_latch = nt;
+            const uint8_t at = page[(v >> 10) & 3u][0x3C0u | ((v >> 4) & 0x38u) | ((v >> 2) & 0x07u)];
+            ppu->at_latch = (uint8_t)((at >> (((v >> 4) & 4u) | (v & 2u))) & 3u);
+            ppu->at_latch_lo = ppu->at_latch & 1u;
+            ppu->at_latch_hi = (ppu->at_latch >> 1) & 1u;
+            const uint16_t pa = (uint16_t)(pt_base + ((uint16_t)nt << 4) + ((v >> 12) & 7u));
+            ppu->pt_lo_latch = ppu->chr_win[pa >> 10][pa & 0x3FFu];
+            ppu->pt_hi_latch = ppu->chr_win[(pa + 8u) >> 10][(pa + 8u) & 0x3FFu];
+            incr_coarse_x(ppu);
+
+            /* bits 0-1 the pixel, 2-3 its palette; one byte per dot */
+            const unsigned wl = (lo >> wsh) & 0xFFu, wh = (hi >> wsh) & 0xFFu;
+            const unsigned wal = (alo >> wsh) & 0xFFu, wah = (ahi >> wsh) & 0xFFu;
+            uint32_t ia = spread[0][wl] | spread[0][wh] << 1 | spread[0][wal] << 2 | spread[0][wah] << 3;
+            uint32_t ib = spread[1][wl] | spread[1][wh] << 1 | spread[1][wal] << 2 | spread[1][wah] << 3;
+            const int x = dot - 1;
+            uint8_t *o = out + x;
+            const uint8_t *spk = sp + (dot - dot0);
+            uint32_t any = 0;
+            if (n_spr && show_spr) {
+                uint32_t s0, s1;
+                memcpy(&s0, spk, 4); memcpy(&s1, spk + 4, 4);
+                any = s0 | s1;
+            }
+            for (int j = 0; j < 8; j++) {
+                const unsigned idx = (j < 4 ? ia >> (24 - 8 * j) : ib >> (56 - 8 * j)) & 0x0Fu;
+                uint8_t color = pal16[idx];
+                uint8_t spx;
+                if (any && (spx = spk[j]) != 0) {
+                    const unsigned bg_px = idx & 3u;
+                    if ((spx & 0x80u) && bg_px && x + j < 255) {
+                        if (!(ppu->ppustatus & PPUSTAT_SPR0_HIT))
+                            PPU_LOG("SPR0 HIT at x=%d\n", x + j);
+                        ppu->ppustatus |= PPUSTAT_SPR0_HIT;
+                    }
+                    if (!bg_px || !(spx & 0x40u)) color = pal[spx & 0x1Fu];
+                }
+                o[j] = color;
+                if (argb) argb_out[x + j] = argb[color & 0x3Fu];
+            }
+            lo <<= 7; hi <<= 7; alo <<= 7; ahi <<= 7;
+            dot += 8;
+            continue;
+        }
+
         lo <<= 1; hi <<= 1; alo <<= 1; ahi <<= 1;
         switch (dot & 7) {           /* bg_fetch() */
         case 1:
@@ -881,14 +1034,6 @@ static void visible_span(Rp2c02 *ppu, uint32_t m) {
         default:
             break;
         }
-        if (dot <= 64) {             /* sprite_eval_dot(): clearing secondary OAM */
-            if (!(dot & 1)) ppu->oam2[(dot - 1) >> 1] = 0xFF;
-        } else if (ppu->eval_done && dot > 65) {   /* ...every entry seen: idling */
-            if (dot & 1) ppu->eval_s = ppu->oam[ppu->oamaddr];
-            else         ppu->oamaddr = (uint8_t)(ppu->oamaddr + 4u);
-        } else {
-            sprite_eval_dot(ppu, dot);
-        }
 
         /* output_pixel() */
         const int x = dot - 1;
@@ -909,6 +1054,7 @@ static void visible_span(Rp2c02 *ppu, uint32_t m) {
         }
         out[x] = color;
         if (argb) argb_out[x] = argb[color & 0x3Fu];
+        dot++;
     }
     ppu->dot = dot;
     ppu->bg_shift_lo = lo; ppu->bg_shift_hi = hi;

@@ -5,6 +5,9 @@
 
 #include <gccore.h>
 #include <fat.h>
+#ifdef HW_DOL
+#include <sdcard/gcsd.h>
+#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,14 +18,34 @@ static char app_dir[256];
 static char last_error[160];
 static WiiExit exit_request;
 
+const char *const wii_rom_dirs[] = {
+#ifdef GEMU_EMBED
+    "embed:/gemu/%s",
+#endif
+#ifdef HW_RVL
+    "sd:/gemu/%s", "usb:/gemu/%s", "sd:/roms/%s", "usb:/roms/%s",
+#else   /* SD2SP2 (serial port 2), SD Gecko in slot A / B */
+    "sp2:/gemu/%s", "carda:/gemu/%s", "cardb:/gemu/%s",
+    "sp2:/roms/%s", "carda:/roms/%s", "cardb:/roms/%s",
+#endif
+    NULL,
+};
+
 void wii_init(int argc, char **argv)
 {
     wii_video_init();
     wii_input_init();
     wii_audio_init();
-    storage_ok = fatInitDefault();
+    storage_ok = fatInitDefault();          /* GameCube: SD Gecko, slots A/B */
+#ifdef HW_DOL
+    if (fatMountSimple("sp2", &__io_gcsd2)) storage_ok = true;
+#endif
+#ifdef GEMU_EMBED
+    if (wii_embed_mount()) storage_ok = true;
+#endif
 
-    /* argv[0] from the Homebrew Channel: "sd:/apps/gemu/boot.dol". */
+    /* argv[0] from the Homebrew Channel: "sd:/apps/gemu/boot.dol" (Swiss
+     * may pass none). */
     const char *argv0 = argc > 0 ? argv[0] : NULL;
     if (argv0 && strchr(argv0, ':')) {
         snprintf(app_dir, sizeof(app_dir), "%s", argv0);
@@ -34,9 +57,13 @@ void wii_init(int argc, char **argv)
 void wii_shutdown(WiiExit why)
 {
     wii_audio_shutdown();
+#ifdef HW_RVL
     if (why == WII_EXIT_POWEROFF)
         SYS_ResetSystem(SYS_POWEROFF, 0, 0);
     /* Returning from main() goes back to the Homebrew Channel. */
+#else
+    (void)why;   /* the GameCube can't power itself off; main() returning resets */
+#endif
 }
 
 bool        wii_storage_ok(void) { return storage_ok; }

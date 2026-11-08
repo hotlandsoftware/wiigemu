@@ -22,6 +22,11 @@ static uint32_t pal_word[256];   /* two pixels of one colour: Y Cb Y Cr */
 static uint8_t *prev;            /* last presented canvas, for phosphor */
 static bool     phosphor;
 
+static volatile uint32_t retraces;
+static void on_retrace(u32 n) { (void)n; retraces++; }
+uint32_t wii_video_retraces(void) { return retraces; }
+float    wii_video_refresh_hz(void) { return VIDEO_GetCurrentTvMode() == VI_PAL ? 50.0f : 59.94f; }
+
 static uint8_t clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v; }
 
 void wii_video_set_color(int idx, uint32_t rgb)
@@ -40,11 +45,13 @@ void wii_video_init(void)
     VIDEO_Init();
     rmode = VIDEO_GetPreferredMode(NULL);
 
+#ifdef HW_RVL   /* the GameCube has no system aspect setting: always 4:3 */
     /* 16:9 TVs: narrow the VI output so square pixels stay square. */
     if (CONF_GetAspectRatio() == CONF_ASPECT_16_9) {
         rmode->viWidth   = 678;
         rmode->viXOrigin = (VI_MAX_WIDTH_PAL - 678) / 2;
     }
+#endif
 
     xfb[0] = SYS_AllocateFramebuffer(rmode);
     xfb[1] = SYS_AllocateFramebuffer(rmode);
@@ -54,6 +61,7 @@ void wii_video_init(void)
     memset(canvas, 0, (size_t)cw * ch);
 
     VIDEO_Configure(rmode);
+    VIDEO_SetPostRetraceCallback(on_retrace);
     VIDEO_ClearFrameBuffer(rmode, xfb[0], COLOR_BLACK);
     VIDEO_ClearFrameBuffer(rmode, xfb[1], COLOR_BLACK);
     DCFlushRange(xfb[0], (u32)VIDEO_GetFrameBufferSize(rmode));

@@ -22,6 +22,24 @@ with N the machine freezes at poll N and CPU registers are drawn on screen.
 
 ---
 
+## GameCube build
+
+`make PLATFORM=gc` -> `gemu-gc.dol` from the same sources (`HW_DOL`; Wii-only
+code is under `#ifdef HW_RVL`): GC pads only, no power-off, "Exit (reset)",
+4:3 always.  ROMs from `sp2:` (SD2SP2), `carda:`/`cardb:` (SD Gecko), in
+`gemu/<machine>/` or `roms/<machine>/` (`wii_rom_dirs` in core/src/wii.c).
+`make PLATFORM=gc package` -> `dist/gamecube/gemu.dol` (boot it from Swiss).
+Dolphin has no GC SD adapter, so `tools/run-dolphin.sh --gc` bakes the staged
+SD tree into the DOL (`EMBED=dir`, read-only `embed:` device,
+core/src/embed_fs.c + tools/pack_embed.py).  Dolphin runs GC code at the
+GC's 486 MHz, so the overlay timings are the real GC's.  NES: heavy scenes
+can exceed a vblank there; machine_nes.c then runs two frames per pass and
+shows one (frame skip), back to 1:1 once the 60-frame max fits.
+Note: an AUTOTEST=N frame can look identical to the boot screen (e.g. 1100) -
+check the script before suspecting a hang.
+
+---
+
 ## Upstream files - do not edit
 
 Copied verbatim from GEMU, listed in `UPSTREAM` in the Makefile (files in
