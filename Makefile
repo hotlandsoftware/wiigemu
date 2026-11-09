@@ -40,6 +40,9 @@ DEFINES :=
 
 ifneq ($(AUTOTEST),)
 DEFINES += -DGEMU_WII_AUTOTEST=$(AUTOTEST)
+ifneq ($(AUTOTEST_NETPLAY),)
+DEFINES += -DGEMU_WII_AUTOTEST_NETPLAY     # the netplay script (tests/autotest_wii.c)
+endif
 BUILD   := build$(SUFFIX)-autotest
 TARGET  := gemu$(SUFFIX)-autotest
 endif
@@ -65,6 +68,21 @@ DATA :=
 
 ifneq ($(AUTOTEST),)
 SRCS += tests/autotest_wii.c
+endif
+
+# Netplay (Kaillera), Wii only: the GameCube has no network without a
+# Broadband Adapter.  The session and protocol are upstream's files;
+# net_wii.c supplies what libogc lacks, netplay_wii.c is the screen.
+UPSTREAM += core/include/gemu/netplay.h core/include/gemu/util.h \
+            core/src/netplay.c core/src/netplay_kaillera.c core/src/netplay_lists.c \
+            core/src/netplay_priv.h core/include/gemu/sha256.h core/src/sha256.c
+ifeq ($(PLATFORM),wii)
+DEFINES += -DGEMU_NETPLAY
+SRCS    += core/src/netplay.c core/src/netplay_kaillera.c core/src/netplay_lists.c \
+           core/src/net_wii.c core/src/netplay_wii.c core/src/sha256.c
+# libogc declares htons in arpa/inet.h, not netinet/in.h; and a truncation
+# warning in upstream's code that can't happen (128-byte server names).
+$(BUILD)/core/src/netplay.o $(BUILD)/core/src/netplay_%.o: CFLAGS += -include arpa/inet.h -Wno-format-truncation
 endif
 
 # Files baked into the DOL as the read-only embed: device (core/src/embed_fs.c):

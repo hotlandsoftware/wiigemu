@@ -29,6 +29,46 @@
 #include <wiiuse/wpad.h>
 #endif
 
+#ifdef GEMU_WII_AUTOTEST_NETPLAY
+/*
+ * Netplay (make AUTOTEST_NETPLAY=1; tools/run-dolphin.sh --netplay=HOST:PORT,
+ * which puts that server in netplay.ini): load smb.nes, HOME > Netplay >
+ * Connect..., the recent server, Create Game, say "hi" (the on-screen
+ * keyboard), and Start a few seconds later (someone joins meanwhile, e.g.
+ * GEMU on the PC); then press Start and run right, jumping, as player 1;
+ * open the lobby and close it again.
+ * Freeze points: 300 connect page, 580 lobby, 700 keyboard, 860 game room,
+ * 1000 playing, 2380 lobby in game.
+ */
+static const struct { int frame, len; uint32_t btn; } autotest_script[] = {
+    {  20, 2, WII_BTN_DOWN }, {  30, 2, WII_BTN_DOWN },     /* home: -> NES          */
+    {  50, 2, WII_BTN_ACCEPT },                             /* ROM list              */
+    {  80, 2, WII_BTN_DOWN }, {  90, 2, WII_BTN_ACCEPT },   /* 2nd entry: smb.nes    */
+    { 150, 2, WII_BTN_PAUSE },                              /* HOME                  */
+    { 170, 2, WII_BTN_LEFT }, { 180, 2, WII_BTN_LEFT },     /* wrap: Help, Netplay   */
+    { 200, 2, WII_BTN_ACCEPT },                             /* Connect...            */
+    { 260, 2, WII_BTN_DOWN }, { 270, 2, WII_BTN_DOWN }, { 280, 2, WII_BTN_DOWN },
+    { 420, 2, WII_BTN_ACCEPT },                             /* the recent server     */
+    { 620, 2, WII_BTN_ACCEPT },                             /* Create Game           */
+    { 660, 2, WII_BTN_PLUS },                               /* + : chat keyboard     */
+    { 670, 2, WII_BTN_DOWN }, { 675, 2, WII_BTN_RIGHT }, { 678, 2, WII_BTN_RIGHT },
+    { 681, 2, WII_BTN_RIGHT }, { 684, 2, WII_BTN_RIGHT }, { 687, 2, WII_BTN_RIGHT },
+    { 690, 2, WII_BTN_ACCEPT },                             /* h                     */
+    { 695, 2, WII_BTN_UP }, { 700, 2, WII_BTN_RIGHT }, { 703, 2, WII_BTN_RIGHT },
+    { 706, 2, WII_BTN_ACCEPT },                             /* i                     */
+    { 720, 2, WII_BTN_PLUS },                               /* + : send              */
+    { 900, 2, WII_BTN_ACCEPT },                             /* Start the game        */
+    { 1150, 4, WII_BTN_PLUS },                              /* + : Start             */
+    { 1400, 600, WII_BTN_RIGHT | WII_BTN_BACK },            /* run right (B held)... */
+    { 1440, 20, WII_BTN_ACCEPT }, { 1540, 20, WII_BTN_ACCEPT }, /* ...jumping (A)   */
+    { 1640, 20, WII_BTN_ACCEPT }, { 1740, 20, WII_BTN_ACCEPT },
+    { 1840, 20, WII_BTN_ACCEPT }, { 1940, 20, WII_BTN_ACCEPT },
+    { 2300, 2, WII_BTN_PAUSE },                             /* HOME                  */
+    { 2310, 2, WII_BTN_LEFT }, { 2320, 2, WII_BTN_LEFT },   /* -> Netplay            */
+    { 2330, 2, WII_BTN_ACCEPT },                            /* Lobby... (Connect... is off) */
+    { 2400, 2, WII_BTN_BACK },                              /* back to the game      */
+};
+#else
 static const struct { int frame, len; uint32_t btn; } autotest_script[] = {
     {  24, 2, WII_BTN_DOWN },                               /* home: -> CHIP-8       */
     {  30, 2, WII_BTN_ACCEPT },                             /* pick CHIP-8           */
@@ -91,6 +131,7 @@ static const struct { int frame, len; uint32_t btn; } autotest_script[] = {
     { 3060, 2, WII_BTN_UP }, { 3070, 2, WII_BTN_ACCEPT },   /* broken.nes -> error   */
     { 3110, 2, WII_BTN_BACK },                              /* home                  */
 };
+#endif
 
 /* AUTOTEST=N stops the script at poll N, freezing the app in that state. */
 #if GEMU_WII_AUTOTEST > 1

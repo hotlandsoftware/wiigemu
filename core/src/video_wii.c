@@ -252,6 +252,13 @@ uint32_t *wii_video_direct(void) { return xfb[back]; }
 
 uint32_t wii_video_yuyv(uint8_t a, uint8_t b) { return pair_word(a, b); }
 
+void wii_video_direct_rows(int y0, int y1)
+{
+    if (y0 < 0) y0 = 0;
+    if (y1 > ch) y1 = ch;
+    if (y0 < y1) convert_rows(y0, y1);
+}
+
 void wii_video_present_direct(int y0, int y1)
 {
     u64 t0 = gettime();

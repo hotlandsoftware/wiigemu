@@ -20,6 +20,12 @@
 #                     last frame (and audio) to build-autotest/dolphin/. With N
 #                     the script stops and the machine freezes at poll N.
 #   --seconds=S       autotest run time (default 40)
+#   --netplay=HOST:PORT  autotest with the netplay script (Wii): load the
+#                     staged smb.nes, connect to that Kaillera server (put in
+#                     netplay.ini as the recent server, name "wii"), create a
+#                     game and start it a few seconds later - have a second
+#                     player join meanwhile (tools/kaillera_test_server.py
+#                     is a local server)
 #
 # Normal runs use a repo-local Dolphin profile (.dolphin/) whose controller
 # mappings are copied from your own Dolphin config on every run, with the
@@ -34,7 +40,7 @@ USER_NAND=${XDG_DATA_HOME:-$HOME/.local/share}/dolphin-emu/Wii
 HBC_TITLE=000100014C554C5A          # "LULZ", the Homebrew Channel
 HBC_DIR=title/00010001/4c554c5a
 
-build=1 autotest= seconds=40 hbc= gc= roms=()
+build=1 autotest= seconds=40 hbc= gc= netplay= roms=()
 for arg in "$@"; do
     case $arg in
         --no-build)    build= ;;
@@ -43,7 +49,8 @@ for arg in "$@"; do
         --autotest)    autotest=1 ;;
         --autotest=*)  autotest=${arg#*=} ;;
         --seconds=*)   seconds=${arg#*=} ;;
-        -h|--help)     sed -n '2,24s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        --netplay=*)   netplay=${arg#*=}; autotest=${autotest:-1} ;;
+        -h|--help)     sed -n '2,30s/^# \{0,1\}//p' "$0"; exit 0 ;;
         -*)            echo "unknown option: $arg" >&2; exit 2 ;;
         *)             roms+=("$arg") ;;
     esac
@@ -76,6 +83,7 @@ build_dol() {   # GameCube: after staging, since the SD tree goes into the DOL
     [ -n "$build" ] || return 0
     local mk=(make -C "$ROOT" --no-print-directory)
     [ -n "$gc" ] && mk+=(PLATFORM=gc EMBED="$sd/gemu")
+    [ -n "$netplay" ] && mk+=(AUTOTEST_NETPLAY=1)
     if [ -n "$autotest" ]; then
         rm -rf "$ROOT/build$sfx-autotest/core" "$ROOT/build$sfx-autotest/hardware" \
                "$ROOT/build$sfx-autotest/tests"   # AUTOTEST=N is baked in
@@ -97,6 +105,7 @@ if [ -n "$autotest" ]; then              # fixtures: tests/roms/<machine>/
     done
 fi
 [ -d "$ROOT/dist/apps/gemu" ] && cp "$ROOT"/dist/apps/gemu/* "$sd/apps/gemu/"
+[ -n "$netplay" ] && printf 'user=wii\nconn=3\nserver=%s\n' "$netplay" > "$sd/gemu/netplay.ini"
 for rom in "${roms[@]}"; do
     m=$(machine_for "$rom") || { echo "no machine for $rom" >&2; exit 1; }
     mkdir -p "$sd/gemu/$m" && cp "$rom" "$sd/gemu/$m/"

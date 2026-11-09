@@ -40,6 +40,39 @@ check the script before suspecting a hang.
 
 ---
 
+## Netplay (Wii)
+
+Upstream's Kaillera netplay, verbatim: `core/src/netplay{,_kaillera,_lists}.c`,
+`netplay_priv.h`, `gemu/netplay.h`, `gemu/util.h`, `gemu/sha256.h` +
+`sha256.c` (UPSTREAM; Wii build only, `GEMU_NETPLAY`).  `core/src/net_wii.c`
+supplies what libogc lacks: IPv4 `getaddrinfo`, `select()` over `poll()`
+(polled with timeout 0 every 2 ms - Dolphin's poll timeout waits for the
+next packet, which starved the session thread's keepalives), the config
+dir (`sd:/gemu/netplay.ini`), a no-op `gemu_monitor_printf`.  Gotchas:
+libogc's `network.h` fd_set clashes with newlib's (kept out of those
+files); `net_init()` doesn't call `socInit()` (only `if_config` does), so
+`socket()` failed with ENODEV until `netplay_wii.c` called it; `htons` is in
+`arpa/inet.h` (force-included for the netplay objects).
+`core/src/netplay_wii.c`: one session for the run (stays connected across
+ROMs), the Netplay screen (connect / lobby / room pages, on-screen keyboard,
+which closes if the session moves on - a game starting mustn't wait for
+someone's chat), the Netplay menu, in-game notices.  NES side
+(`machine_nes.c`, `np_*`) follows upstream's: power-on snapshot (taken
+before the battery load), own game kept aside and restored, lockstep
+`netplay_frame` per frame, reset through the session, `netplay_sync_hash`
+every 300 frames.  The lobby name must match upstream's exactly, so it hashes
+upstream's *default* controller config (port 1 controller, port 2 empty)
+and the game is played that way (port 2 gets a controller when there's a
+player 2, as upstream does) - "smb [e447318b]" on both.
+Testing: `tools/kaillera_test_server.py` (local server; logs sync hashes and
+readiness) + `tools/run-dolphin.sh --netplay=HOST:PORT roms/nes/smb.nes`
+(`make AUTOTEST_NETPLAY=1` script: connect to the netplay.ini server,
+create, chat, start, play, lobby) with headless desktop GEMU joining via its
+telnet monitor (`-display none -monitor telnet:...`; `-monitor stdio` doesn't
+read a pipe).  Autotest builds don't fetch the public server lists.
+
+---
+
 ## Upstream files - do not edit
 
 Copied verbatim from GEMU, listed in `UPSTREAM` in the Makefile (files in

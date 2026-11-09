@@ -17,6 +17,10 @@
 #include "gemu/menubar_wii.h"
 #include "gemu/video_wii.h"
 #include "gemu/input_wii.h"
+#ifdef GEMU_NETPLAY
+#include "gemu/netplay_wii.h"
+#include "gemu/sha256.h"
+#endif
 
 #include <gccore.h>
 #include <ogc/lwp_watchdog.h>
@@ -28,6 +32,9 @@
 #define NES_CPU_CYCLES_PER_FRAME 29780.5    /* NTSC: 60.10 frames a second */
 
 typedef enum { SHAPE_TV, SHAPE_SQUARE, SHAPE_STRETCH } Shape;
+
+/* A copy of the machine in memory: the state, and the CHR RAM it draws from. */
+typedef struct { NesState *s; uint8_t *chr; size_t chr_len; } NesSnap;
 
 /* NesState comes first, so the API's pointer is also a NesWii *. */
 typedef struct {
@@ -49,6 +56,17 @@ typedef struct {
     uint32_t  underruns0, shown_underruns;
     bool      skip;             /* one frame per vblank doesn't fit: two per pass */
     int       last_run;
+#ifdef GEMU_NETPLAY
+    /* Netplay (see "Netplay" below) */
+    NesSnap   poweron;          /* the machine as created: every player's start */
+    NesSnap   before;           /* the player's own game, while a netplay game is on */
+    bool      np_active;
+    bool      np_reset;         /* Reset chosen: sent with our next input */
+    uint64_t  np_frame;
+    uint8_t   np_pad;           /* our controller 1, this pass */
+    NesDeviceType np_ports[2];  /* the player's own ports, put back afterwards */
+    int       np_n_ports;
+#endif
 } NesWii;
 
 /* ── Battery-backed PRG RAM: <rom without extension>.sav ─────────────────── */
@@ -83,23 +101,17 @@ static void sav_save(NesState *s)
     fclose(f);
 }
 
-#ifdef GEMU_WII_AUTOTEST
-/* Autotest: resume from <rom>.nesstate if there is one - a raw NesState
- * of this same build, lifted out of a Dolphin save state (so a slow scene
- * can be measured).  Everything that points into this run is kept. */
-static void load_test_state(NesState *s)
+/* ── Machine state copies ─────────────────────────────────────────────────── */
+#if defined(GEMU_WII_AUTOTEST) || defined(GEMU_NETPLAY)
+
+/* Overwrite s with from (this same build's NesState), keeping everything
+ * that points into this run - as upstream's loadvm does. */
+static void state_restore(NesState *s, const NesState *from)
 {
-    char path[520];
-    sav_path(s, path, sizeof(path));
-    strcpy(path + strlen(path) - 4, ".nesstate");
-    FILE *f = fopen(path, "rb");
-    if (!f) return;
     NesState *keep = malloc(sizeof(*keep));
-    if (!keep) { fclose(f); return; }
+    if (!keep) return;
     *keep = *s;
-    size_t got = fread(s, 1, sizeof(*s), f);
-    fclose(f);
-    if (got != sizeof(*s) || s->cart.mapper != keep->cart.mapper) { *s = *keep; free(keep); return; }
+    *s = *from;
     s->cfg = keep->cfg;  s->prg = keep->prg;  s->chr = keep->chr;
     s->cpu.mem_read = keep->cpu.mem_read;  s->cpu.mem_write = keep->cpu.mem_write;
     s->cpu.mem_ud = keep->cpu.mem_ud;
@@ -119,6 +131,205 @@ static void load_test_state(NesState *s)
 }
 #endif
 
+#ifdef GEMU_WII_AUTOTEST
+/* Autotest: resume from <rom>.nesstate if there is one - a raw NesState
+ * of this same build, lifted out of a Dolphin save state (so a slow scene
+ * can be measured). */
+static void load_test_state(NesState *s)
+{
+    char path[520];
+    sav_path(s, path, sizeof(path));
+    strcpy(path + strlen(path) - 4, ".nesstate");
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    NesState *st = malloc(sizeof(*st));
+    if (!st) { fclose(f); return; }
+    size_t got = fread(st, 1, sizeof(*st), f);
+    fclose(f);
+    if (got == sizeof(*st) && st->cart.mapper == s->cart.mapper) state_restore(s, st);
+    free(st);
+}
+#endif
+
+#ifdef GEMU_NETPLAY
+/* CHR RAM, which lives outside NesState (as upstream's nes_chr_ram). */
+static uint8_t *chr_ram(const NesState *s, size_t *len)
+{
+    if (s->chr_is_ram) { *len = (size_t)s->cart.chr_banks * 0x2000u; return s->chr; }
+    if (s->cart.mapper == 119 && s->chr) {
+        *len = 0x2000u;
+        return s->chr + (size_t)s->cart.chr_banks * 0x2000u;
+    }
+    *len = 0;
+    return NULL;
+}
+
+static void snap_free(NesSnap *n) { free(n->s); free(n->chr); *n = (NesSnap){0}; }
+
+static bool snap_take(const NesState *s, NesSnap *n)
+{
+    size_t len;
+    const uint8_t *chr = chr_ram(s, &len);
+    *n = (NesSnap){ malloc(sizeof(NesState)), len ? malloc(len) : NULL, len };
+    if (!n->s || (len && !n->chr)) { snap_free(n); return false; }
+    *n->s = *s;
+    if (len) memcpy(n->chr, chr, len);
+    return true;
+}
+
+static void snap_put(NesState *s, const NesSnap *n)
+{
+    size_t len;
+    uint8_t *chr = chr_ram(s, &len);
+    if (len == n->chr_len && len) memcpy(chr, n->chr, len);
+    state_restore(s, n->s);
+}
+
+/* ── Netplay ────────────────────────────────────────────────────────────────
+ *
+ * As upstream's machine_nes.c: every player's NES runs the same frames with
+ * the same input, so a netplay game starts every machine from the same
+ * state - the one this machine had when it was created, before the battery
+ * save was loaded, with PRG-RAM cleared.  The player's own game is kept
+ * aside and put back afterwards, and nothing is saved to their battery
+ * file meanwhile.  Controller 1 is ours; the session hands back every
+ * player's, and players 1 and 2 drive the two ports.  Reset goes through
+ * the session, so every machine resets on the same frame.
+ *
+ * The emulation is upstream's (make test-nes), so a Wii can play with GEMU
+ * on a computer.  For that the game has to be listed the same way: under
+ * upstream's default controller setup - a controller in port 1, port 2
+ * empty - which is also how it's played, a second controller going into
+ * port 2 when there's a player 2 (as upstream does for an empty port). */
+
+#define NP_SYNC_FRAMES 300      /* compare state every 5 s */
+
+/* The game's name in the lobby, exactly as upstream's nes_np_game_name:
+ * the ROM's name, and a hash of what has to match for the games to stay
+ * in step (ROM contents, region, controllers). */
+static void np_game_name(const NesState *s, char *out, size_t len)
+{
+    const char *path = s->cart_path_buf, *base = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '/' || *p == '\\') base = p + 1;
+    const char *dot = strrchr(base, '.');
+    int n = dot ? (int)(dot - base) : (int)strlen(base);
+    if (n > 255) n = 255;
+    GemuSha256Ctx ctx;
+    uint8_t d[GEMU_SHA256_DIGEST_LEN];
+    gemu_sha256_init(&ctx);
+    if (s->prg) gemu_sha256_update(&ctx, s->prg, (size_t)s->cart.prg_banks * 0x4000u);
+    if (s->chr && !s->chr_is_ram) gemu_sha256_update(&ctx, s->chr, (size_t)s->cart.chr_banks * 0x2000u);
+    uint8_t cfg[4] = { (uint8_t)s->cfg->is_pal, 1, NES_DEVICE_CONTROLLER, NES_DEVICE_NONE };
+    gemu_sha256_update(&ctx, cfg, sizeof(cfg));
+    gemu_sha256_final(&ctx, d);
+    snprintf(out, len, "%.*s [%02x%02x%02x%02x]", n > 100 ? 100 : n, base, d[0], d[1], d[2], d[3]);
+}
+
+/* The state compared between players: RAM, PRG-RAM and the CPU. */
+static uint32_t np_state_hash(const NesState *s)
+{
+    uint32_t h = 2166136261u;
+    const uint8_t *parts[] = { s->ram, s->prg_ram };
+    const size_t sizes[] = { sizeof(s->ram), sizeof(s->prg_ram) };
+    for (int p = 0; p < 2; p++)
+        for (size_t i = 0; i < sizes[p]; i++) h = (h ^ parts[p][i]) * 16777619u;
+    uint8_t cpu[6] = { s->cpu.A, s->cpu.X, s->cpu.Y, s->cpu.SP, (uint8_t)s->cpu.PC, (uint8_t)(s->cpu.PC >> 8) };
+    for (int i = 0; i < 6; i++) h = (h ^ cpu[i]) * 16777619u;
+    return h;
+}
+
+static void np_setup(NesWii *w)
+{
+    if (!snap_take(&w->s, &w->poweron)) return;
+    char game[NETPLAY_GAME_LEN];
+    np_game_name(&w->s, game, sizeof(game));
+    wii_netplay_set_game(game);
+}
+
+static void np_begin(NesWii *w, int player, int players)
+{
+    NesState *s = &w->s;
+    Netplay *np = wii_netplay();
+    if (!w->poweron.s || !snap_take(s, &w->before)) {
+        netplay_note(np, "Out of memory - leaving the game");
+        netplay_leave_game(np);
+        return;
+    }
+    sav_save(s);                     /* the player's battery save, as it is now */
+    snap_put(s, &w->poweron);
+    memset(s->prg_ram, 0, sizeof(s->prg_ram));
+    w->np_ports[0] = w->cfg.ports[0];
+    w->np_ports[1] = w->cfg.ports[1];
+    w->np_n_ports = w->cfg.n_ports;
+    w->cfg.n_ports = 1;
+    w->cfg.ports[0] = NES_DEVICE_CONTROLLER;
+    w->cfg.ports[1] = players > 1 ? NES_DEVICE_CONTROLLER : NES_DEVICE_NONE;
+    w->np_active = true;
+    w->np_frame = 0;
+    w->np_reset = false;
+    netplay_note(np, "Console powered on - player %d of %d%s", player, players,
+                 players > 2 ? " (players 3 and up have no controller port)" : "");
+    netplay_ready(np);
+}
+
+static void np_end(NesWii *w)
+{
+    if (!w->np_active) return;
+    w->np_active = false;
+    w->cfg.ports[0] = w->np_ports[0];
+    w->cfg.ports[1] = w->np_ports[1];
+    w->cfg.n_ports = w->np_n_ports;
+    if (w->before.s) snap_put(&w->s, &w->before);
+    snap_free(&w->before);
+    w->s.ctrl_state[0] = w->s.ctrl_state[1] = 0;
+    netplay_note(wii_netplay(), "Netplay game over - back to your own game");
+}
+
+/* Leaving the machine: out of the game - also one that hasn't started, or
+ * it would start on whatever is loaded next - and our own game back.  The
+ * session itself stays connected. */
+static void np_teardown(NesWii *w)
+{
+    Netplay *np = wii_netplay();
+    NetplayInfo in;
+    if (np) netplay_info(np, &in);
+    if (np && in.state >= NETPLAY_ROOM) netplay_leave_game(np);
+    np_end(w);
+    wii_netplay_set_game(NULL);
+    snap_free(&w->poweron);
+}
+
+/* Before a frame: everyone's input for it.  1 to run it, 0 while the
+ * others' input hasn't arrived (run nothing), -1 when the game has ended. */
+static int np_frame(NesWii *w)
+{
+    NesState *s = &w->s;
+    uint8_t local[NETPLAY_INPUT_BYTES] = { w->np_pad, w->np_reset ? NETPLAY_INPUT_RESET : 0 };
+    uint8_t all[NETPLAY_MAX_PLAYERS * NETPLAY_INPUT_BYTES];
+    int players;
+    int r = netplay_frame(wii_netplay(), local, all, &players);
+    if (r <= 0) return r;
+    w->np_reset = false;
+    for (int p = 0; p < players; p++)
+        if (all[p * NETPLAY_INPUT_BYTES + 1] & NETPLAY_INPUT_RESET) {
+            nes_core_reset(s);
+            netplay_note(wii_netplay(), "Console reset (player %d)", p + 1);
+            break;
+        }
+    s->ctrl_state[0] = all[0];
+    s->ctrl_state[1] = players > 1 ? all[NETPLAY_INPUT_BYTES] : 0;
+    w->np_frame++;
+    return 1;
+}
+
+static void np_after_frame(NesWii *w)
+{
+    if (w->np_frame % NP_SYNC_FRAMES == 0)
+        netplay_sync_hash(wii_netplay(), w->np_frame, np_state_hash(&w->s));
+}
+#endif
+
 /* ── Machine API ─────────────────────────────────────────────────────────── */
 
 NesState *nes_create(const MosConfig *cfg)
@@ -134,6 +345,9 @@ NesState *nes_create(const MosConfig *cfg)
         return NULL;
     }
     nes_core_init(s, &w->cfg);
+#ifdef GEMU_NETPLAY
+    np_setup(w);                /* before the battery save: everyone's start */
+#endif
     /* Sound 0.27% slow on a 59.94 Hz TV, so one frame per vblank (60.10 Hz)
      * makes exactly what is played and the queue holds without catch-up
      * frames (which need two frames to fit a vblank).  50 Hz TVs: as is,
@@ -155,6 +369,9 @@ NesState *nes_create(const MosConfig *cfg)
 void nes_destroy(NesState *s)
 {
     if (!s) return;
+#ifdef GEMU_NETPLAY
+    np_teardown((NesWii *)s);   /* the player's own game back, then save it */
+#endif
     sav_save(s);
     nes_core_free(s);
     free((NesWii *)s);
@@ -335,7 +552,11 @@ static bool port_is(void *ud, int arg)
 }
 static void port_set(void *ud, int arg)
 {
-    ((NesWii *)ud)->cfg.ports[arg / 4] = (NesDeviceType)(arg % 4);
+    NesWii *w = ud;
+#ifdef GEMU_NETPLAY
+    if (w->np_active) return;       /* every player's NES must stay the same */
+#endif
+    w->cfg.ports[arg / 4] = (NesDeviceType)(arg % 4);
 }
 
 static void nes_menus(void *ud, GemuMenu *bar)
@@ -348,6 +569,9 @@ static void nes_menus(void *ud, GemuMenu *bar)
     GemuMenuItem *it = gemu_menu_add(vid, GEMU_MENU_CHECK, "Hide overscan",
                                      overscan_toggle, ud, 0);
     it->checked = overscan_on;
+#ifdef GEMU_NETPLAY
+    wii_netplay_menu(bar);
+#endif
 }
 
 static void nes_input_items(void *ud, GemuMenu *input)
@@ -363,6 +587,10 @@ static void nes_input_items(void *ud, GemuMenu *input)
 static void menu_reset(void *ud)
 {
     NesState *s = ud;
+#ifdef GEMU_NETPLAY
+    NesWii *w = ud;
+    if (w->np_active) { w->np_reset = true; return; }   /* everyone resets together */
+#endif
     sav_save(s);
     nes_core_reset(s);
 }
@@ -471,6 +699,13 @@ void nes_run(NesState *s, const MosConfig *cfg)
 
         s->ctrl_state[0] = pad_from(in.port[0]);
         s->ctrl_state[1] = pad_from(in.port[1]);
+#ifdef GEMU_NETPLAY
+        /* A netplay game starting: power on as everyone else does. */
+        int np_player, np_players;
+        if (netplay_take_start(wii_netplay(), &np_player, &np_players))
+            np_begin(w, np_player, np_players);
+        w->np_pad = s->ctrl_state[0];   /* we play on our controller 1 */
+#endif
         bool paused = wii_menubar_paused(menubar);
 #ifdef GEMU_WII_AUTOTEST
         paused |= wii_autotest_frozen();
@@ -483,10 +718,20 @@ void nes_run(NesState *s, const MosConfig *cfg)
                     uint64_t real_us = ticks_to_microsecs(diff_ticks(t0, gettime()));
                     if (emu_cycles * 1000000.0 / NES_CPU_HZ >= (double)real_us) break;
                 }
+#ifdef GEMU_NETPLAY
+                if (w->np_active) {             /* everyone's input, or wait for it */
+                    int r = np_frame(w);
+                    if (r < 0) np_end(w);
+                    else if (r == 0) break;
+                }
+#endif
                 uint64_t c0 = s->cpu.cycle_count;
                 run_frame(w);
                 w->n_run++;
                 emu_cycles += s->cpu.cycle_count - c0;
+#ifdef GEMU_NETPLAY
+                if (w->np_active) np_after_frame(w);
+#endif
             }
         }
 
@@ -497,6 +742,11 @@ void nes_run(NesState *s, const MosConfig *cfg)
         else                draw_direct(w);
         w->draw_us = (uint32_t)ticks_to_microsecs(diff_ticks(d0, gettime()));
         u64 p0 = gettime();
+#ifdef GEMU_NETPLAY
+        int ny0, ny1;                   /* chat, players joining or dropping... */
+        wii_netplay_notices(&ny0, &ny1);
+        if (!w->paused_view) wii_video_direct_rows(ny0, ny1);
+#endif
         if (w->paused_view) {
             wii_video_present();
         } else {
@@ -520,6 +770,9 @@ void nes_run(NesState *s, const MosConfig *cfg)
             w->iters++;
         }
     }
+#ifdef GEMU_NETPLAY
+    if (w->np_active) { netplay_leave_game(wii_netplay()); np_end(w); }   /* not into the save */
+#endif
     sav_save(s);
     wii_menubar_free(menubar);
 }
