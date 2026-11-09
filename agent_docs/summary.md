@@ -108,7 +108,7 @@ Wii-specific code goes in `*_wii.c` / `*_wii.h`, `hardware/machine/`, `src/`.
 - Atari 2600 (`hardware/machine/mos/machine_atari2600.c`, setup in
   `src/mos_setup.c`): upstream's memory map / WSYNC / ports / window /
   palettes; built-in test cart from `tools/make_a26_testcart.py`. Paced by
-  the audio queue (`AUDIO_TARGET`), up to 3 frames per vblank. Menus via the
+  the audio queue (`AUDIO_TARGET`), up to 3 frames per pass. Menus via the
   `menus` hook: Console, Video; jacks under Input. Machine palette lives at
   128..255 in the video layer (`WII_COL_MACHINE`); phosphor is a video-layer
   blend. Input: `WiiInput.port[0/1]` = left/right joystick,
@@ -118,8 +118,14 @@ Wii-specific code goes in `*_wii.c` / `*_wii.h`, `hardware/machine/`, `src/`.
   ~6.5 ms idle (was 23.5 ms emulation and 20-34 fps). Exact speed-ups:
   lazy TIA + cart fast paths (2K/4K, F8/F6/F4 w/o SC) in `a2600_bus.c`;
   batched sound (`tia_sound_run`), quiet-HBLANK skip (`hblank_span`) and
-  idle spans (`idle_span`/`run_idle`) in tia.c; 4-pixel paths in
-  `wii_video_present` and the blit; -O3 inlining for `HOT_SRCS`. The TIA /
+  idle spans (`idle_span`/`run_idle`) in tia.c, which also cover objects
+  drawing nothing (blank GRPx, missile/ball off: `drawing_shows`,
+  `*_skip`) and HBLANK during HMOVE (jumps between movement clocks); 4-pixel
+  paths in `wii_video_present` and the blit; -O3 inlining for `HOT_SRCS`.
+  While the game runs it draws straight to the XFB (`draw_direct`, one YUYV
+  word pair per TIA pixel; canvas path for menu / pause / phosphor), and
+  paces with the NES's frame skip. GameCube (Dolphin) Pitfall: 15.9 ms
+  emulation + 4.2 draw/convert, 40 fps -> 12.0 + 1.0 ms, 60 fps. The TIA /
   sound changes are `PATCHED`; `make test-a26` must stay identical to upstream
   (add ROMs to roms/atari2600/ or A26_ROMS=...).
 - Pacing (`frames_wanted`): 1 frame per vblank; 2 when the audio queue is

@@ -221,15 +221,6 @@ static Layout layout(NesWii *w)
     return l;
 }
 
-/* Every word of these framebuffer rows is about to be written: claim
- * their cache lines without reading them from memory first (dcbz), which
- * otherwise costs as much as the drawing.  Rows are whole lines. */
-static inline void claim_rows(uint32_t *row, int words)
-{
-    for (char *p = (char *)row, *e = (char *)(row + words); p < e; p += 32)
-        __asm__ volatile("dcbz 0,%0" : : "r"(p) : "memory");
-}
-
 /* While the game runs: NES pixels straight to framebuffer words (two
  * screen pixels each), no canvas. */
 static void draw_direct(NesWii *w)
@@ -241,7 +232,7 @@ static void draw_direct(NesWii *w)
     const uint32_t black = wii_video_yuyv(WII_COL_BLACK, WII_COL_BLACK);
     for (int y = 0; y < l.y0; y++) {
         uint32_t *r = fb + (size_t)y * wpr, *r2 = fb + (size_t)(l.H - 1 - y) * wpr;
-        if (claim) { claim_rows(r, wpr); claim_rows(r2, wpr); }
+        if (claim) { wii_video_claim(r, wpr); wii_video_claim(r2, wpr); }
         for (int x = 0; x < wpr; x++) r[x] = r2[x] = black;
     }
     const int bx = l.x0 / 2, pw2 = l.pw / 2;
@@ -250,7 +241,7 @@ static void draw_direct(NesWii *w)
         const uint8_t *src = w->s.ppu.pixels + (size_t)(l.top + y) * RP2C02_WIDTH;
         uint32_t *row = fb + (size_t)(l.y0 + y * l.sy) * wpr;
         uint32_t *row2 = l.sy > 1 ? row + wpr : row;     /* the line's second screen row */
-        if (claim) claim_rows(row, (int)(row2 - row) + wpr);
+        if (claim) wii_video_claim(row, (int)(row2 - row) + wpr);
         for (int x = 0; x < bx; x++) row[x] = row2[x] = black;
         uint32_t *d = row + bx, *d2 = row2 + bx;
         const uint32_t *yuyv = w->yuyv;

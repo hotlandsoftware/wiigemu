@@ -593,22 +593,26 @@ int tia_object_x(const Tia *t, const TiaObject *o, int start_delay) {
 
 /* ── GEMU for Wii: idle spans ─────────────────────────────────────────────── *
  *
- * In the visible part of a line, while no object is drawing or about to
- * start (no start decode before the span ends), no HMOVE is running, no
+ * In the visible part of a line, while no object shows anything or is about
+ * to start (no start decode before the span ends), no HMOVE is running, no
  * delayed write falls due and no debug view is on, a tick only advances the
- * five position counters and draws playfield or background.  Those stretches
- * are run in one go: the counters jump, and the picture is filled in runs
+ * five position counters (and the render counters of drawings that show
+ * nothing) and draws playfield or background.  Those stretches are run in
+ * one go: the counters jump, and the picture is filled in runs
  * that break where tick() would change something - each 4-clock playfield
  * column and the reflect latch at clock 79.  The result is exactly what
  * tick() would produce clock by clock (tests/a26_exact.c checks it). */
 
-/* Quiet HBLANK: no HMOVE and no write due - nothing happens until the
- * clock that ends it (which tick() handles), so jump there. */
+/* Quiet HBLANK: no write due - nothing happens until the clock that ends
+ * it (which tick() handles), so jump there.  While HMOVE runs, only every
+ * 4th clock does something (movement_tick), so jump to the next of those. */
 static uint32_t hblank_span(const Tia *t, uint64_t target) {
-    if (!t->hblank || t->movement || t->debug_view) return 0;
+    if (!t->hblank || t->debug_view) return 0;
+    if (t->movement && (t->hctr & 3) == 0) return 0;
     int end = t->ext_hblank ? TIA_HBLANK + 7 : TIA_HBLANK - 1;   /* tick() clears hblank here */
     if (t->hctr >= end) return 0;
     uint32_t n = (uint32_t)(end - t->hctr);
+    if (t->movement && 4u - (uint32_t)(t->hctr & 3) < n) n = 4u - (uint32_t)(t->hctr & 3);
     if (target - t->clock < n) n = (uint32_t)(target - t->clock);
     for (int i = 0; i < t->dq_n; i++) {
         if (t->dq[i].when <= t->clock) return 0;
@@ -619,10 +623,23 @@ static uint32_t hblank_span(const Tia *t, uint64_t target) {
     return n;
 }
 
+/* An object still drawing a copy is fine if it shows nothing for the rest
+ * of it: a player with no graphics (and no size change in progress), a
+ * missile or ball that isn't enabled.  Writes that could change that are
+ * delayed ones, which end the span.  RESMPx follows a drawing player. */
+static bool drawing_shows(const Tia *t) {
+    for (int i = 0; i < 2; i++) {
+        const TiaObject *p = &t->p[i], *m = &t->m[i];
+        if (p->rendering && (player_pattern(t, i) || p->divider_change >= 0 || t->resmp[i]))
+            return true;
+        if (m->rendering && (t->enam[i] || t->resmp[i])) return true;
+    }
+    return t->bl.rendering && (t->vdelbl ? t->enabl_old : t->enabl_new);
+}
+
 static uint32_t idle_span(const Tia *t, uint64_t target) {
     if (t->hblank || t->movement || t->debug_view || t->debug_colors || t->hide) return 0;
-    if (t->p[0].rendering || t->p[1].rendering || t->m[0].rendering ||
-        t->m[1].rendering || t->bl.rendering) return 0;
+    if (drawing_shows(t)) return 0;
     uint32_t n = (uint32_t)(TIA_LINE_CLOCKS - t->hctr);            /* to the end of the line */
     if (target - t->clock < n) n = (uint32_t)(target - t->clock);
     for (int i = 0; i < t->dq_n; i++) {
@@ -642,7 +659,36 @@ static uint32_t idle_span(const Tia *t, uint64_t target) {
     return n;
 }
 
+/* n clocks of a drawing that shows nothing, as player_tick / missile_tick /
+ * ball_tick advance it (no start decode, no HMOVE in the span). */
+static void player_skip(TiaObject *p, uint32_t n) {
+    for (; n && p->rendering; n--) {
+        p->render++;
+        if (p->width == 1) {
+            if (p->render > 0) p->sample++;
+        } else if (p->render > 1 && ((p->render - 1) & (p->width - 1)) == 0) {
+            p->sample++;
+        }
+        if (p->sample > 7) p->rendering = false;
+    }
+}
+
+static void missile_skip(TiaObject *m, uint32_t n) {
+    for (; n && m->rendering; n--) {
+        if (m->render == -1) m->eff_width = m->width;
+        if (++m->render >= m->width) m->rendering = false;
+    }
+}
+
+static void ball_skip(TiaObject *b, uint32_t n) {
+    for (; n && b->rendering; n--)
+        if (++b->render >= b->width) b->rendering = false;
+}
+
 static void run_idle(Tia *t, uint32_t n) {
+    player_skip(&t->p[0], n); player_skip(&t->p[1], n);
+    missile_skip(&t->m[0], n); missile_skip(&t->m[1], n);
+    ball_skip(&t->bl, n);
     TiaObject *objs[5] = { &t->p[0], &t->p[1], &t->m[0], &t->m[1], &t->bl };
     for (int i = 0; i < 5; i++) {
         objs[i]->on = false;

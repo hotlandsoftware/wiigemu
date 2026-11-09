@@ -81,6 +81,7 @@ typedef struct {
     PaletteMode    palette;
     bool           phosphor;
     int            shown_palette;   /* palette loaded into the video layer, -1 = none */
+    uint32_t       yuyv[128];       /* framebuffer word for a TIA colour (2 screen pixels) */
     bool           paused_view;
     uint32_t       emu_us;          /* time the last emulated frame took (autotest) */
     uint32_t       draw_us;         /* ...and drawing it into the canvas */
@@ -91,6 +92,8 @@ typedef struct {
     uint32_t       shown_loop, shown_present, shown_run, shown_queue;   /* ...last one that ran */
     uint32_t       iters, ips;                                /* loop iterations per Wii second */
     uint32_t       underruns0, shown_underruns;               /* audio refills that ran dry */
+    bool           skip;            /* one frame per vblank doesn't fit: two per pass */
+    int            last_run;        /* frames the last pass ran */
 } A26Wii;
 
 static PaletteMode effective_palette(const A26Wii *w)
@@ -109,6 +112,8 @@ static void load_palette(A26Wii *w)
                      : (p == PAL_PAL ? pal_palette : ntsc_palette)[i];
         wii_video_set_color(WII_COL_MACHINE + i, rgb);
     }
+    for (int i = 0; i < 128; i++)
+        w->yuyv[i] = wii_video_yuyv((uint8_t)(WII_COL_MACHINE + i), (uint8_t)(WII_COL_MACHINE + i));
     w->shown_palette = (int)p;
 }
 
@@ -312,6 +317,10 @@ static void handle_input(Atari2600State *s)
 
 /* ── Drawing ─────────────────────────────────────────────────────────────── */
 
+#ifdef GEMU_WII_AUTOTEST
+static void draw_overlay(A26Wii *w);
+#endif
+
 /* 240 lines x 160 pixels -> 4x horizontally, 2x vertically (640 x 480). */
 static void draw_game(void *ud)
 {
@@ -346,6 +355,52 @@ static void draw_game(void *ud)
     if (w->paused_view)
         wii_video_text(16, 16, 2, WII_COL_ACCENT, "PAUSED");
 #ifdef GEMU_WII_AUTOTEST
+    draw_overlay(w);
+#endif
+}
+
+/* While the game runs on a 640-wide screen: TIA pixels straight to
+ * framebuffer words, no canvas.  A TIA pixel is 4 screen pixels, two
+ * identical words. */
+static bool can_draw_direct(const A26Wii *w)
+{
+    return !w->paused_view && !w->phosphor && wii_video_width() == 4 * TIA_WIDTH;
+}
+
+static void draw_direct(A26Wii *w)
+{
+    Atari2600State *s = &w->s;
+    load_palette(w);
+    const int W = wii_video_width(), H = wii_video_height(), wpr = W / 2;
+    const int sy = H >= 2 * A2600_FB_H ? 2 : 1, y0 = (H - A2600_FB_H * sy) / 2;
+    uint32_t *fb = wii_video_direct();
+    const bool claim = ((uintptr_t)fb & 31) == 0 && (wpr & 7) == 0;
+    const uint32_t black = wii_video_yuyv(WII_COL_BLACK, WII_COL_BLACK);
+    for (int y = 0; y < y0; y++) {         /* PAL's extra lines */
+        uint32_t *r = fb + (size_t)y * wpr, *r2 = fb + (size_t)(H - 1 - y) * wpr;
+        if (claim) { wii_video_claim(r, wpr); wii_video_claim(r2, wpr); }
+        for (int x = 0; x < wpr; x++) r[x] = r2[x] = black;
+    }
+    const uint8_t (*frame)[TIA_WIDTH] = tia_frame(&s->tia);
+    const uint32_t *yuyv = w->yuyv;
+    for (int y = 0; y < A2600_FB_H; y++) {
+        const uint8_t *src = frame[s->window_start + y];
+        uint32_t *row = fb + (size_t)(y0 + y * sy) * wpr;
+        uint32_t *row2 = sy > 1 ? row + wpr : row;
+        if (claim) wii_video_claim(row, (int)(row2 - row) + wpr);
+        for (int x = 0; x < TIA_WIDTH; x++) {
+            uint32_t v = yuyv[src[x] >> 1];
+            row[2 * x] = row[2 * x + 1] = row2[2 * x] = row2[2 * x + 1] = v;
+        }
+    }
+}
+
+#ifdef GEMU_WII_AUTOTEST
+#define OVERLAY_Y 60          /* from the bottom */
+static void draw_overlay(A26Wii *w)
+{
+    Atari2600State *s = &w->s;
+    const int H = wii_video_height();
     wii_video_textf(16, H - 58, 1, WII_COL_WHITE,
                     "frame %llu  pc=%04X  emu %u + draw %u + convert %u us  %s",
                     (unsigned long long)s->tia.frame_count, s->cpu.PC, w->emu_us,
@@ -356,8 +411,8 @@ static void draw_game(void *ud)
                     "loop %u: present %u, %u frames, queue %u  %u loops/s  underruns %u since start",
                     w->shown_loop, w->shown_present, w->shown_run, w->shown_queue, w->ips,
                     w->shown_underruns);
-#endif
 }
+#endif
 
 /* ── Menu bar: Console, Video, Input ─────────────────────────────────────── */
 
@@ -453,16 +508,34 @@ static void menu_reset(void *ud) { a26_bus_power_on(ud); }
  * the Wii's 59.94), nudged by the audio queue so sound never runs dry or
  * drifts behind: 2 frames when it is under one hardware buffer, none when it
  * is more than ~4 frames ahead (which is also how a 50 Hz PAL game skips
- * every 6th vblank).  Without audio, the frame's real duration paces it. */
+ * every 6th vblank).  Without audio, the frame's real duration paces it.
+ *
+ * When one frame and its picture don't fit in a vblank (heavy games on the
+ * GameCube), passes run two frames and show the second - frame skip, the
+ * game keeping its speed - until the slowest of the last 60 frames plus the
+ * drawing would fit again, with SKIP_MARGIN_US to spare (as the NES). */
 #define FRAME_SAMPLES (TIA_SOUND_RATE / 60u)
 #define QUEUE_LOW     SDL_AUDIO_WII_CHUNK
 #define QUEUE_HIGH    (SDL_AUDIO_WII_CHUNK + 4u * FRAME_SAMPLES)
-#define MAX_FRAMES_PER_VBLANK 2
+#define MAX_FRAMES_PER_PASS 3
+#define SKIP_MARGIN_US 1500u
 
-static int frames_wanted(const Atari2600State *s)
+/* vblanks: how many the previous pass (w->last_run frames) took. */
+static int frames_wanted(A26Wii *w, int vblanks)
 {
-    uint32_t q = tia_sound_queued(&s->tia.sound) / (uint32_t)sizeof(float);
-    return q < QUEUE_LOW ? 2 : q > QUEUE_HIGH ? 0 : 1;
+    const uint32_t budget = (uint32_t)(1e6f / wii_video_refresh_hz());
+    if (w->last_run == 1 && vblanks >= 2) {         /* a single frame didn't fit */
+        w->skip = true;
+        w->max_us = UINT32_MAX;                     /* until 60 more are measured */
+        w->emu_sum = w->emu_max = w->emu_n = 0;
+    } else if (w->skip && w->max_us < budget &&
+               w->max_us + w->draw_us + SKIP_MARGIN_US < budget) {
+        w->skip = false;
+    }
+    uint32_t q = tia_sound_queued(&w->s.tia.sound) / (uint32_t)sizeof(float);
+    int n = w->skip ? 2 : q < QUEUE_LOW ? 2 : 1;
+    if (q > QUEUE_HIGH) n--;
+    return n < 0 ? 0 : n > MAX_FRAMES_PER_PASS ? MAX_FRAMES_PER_PASS : n;
 }
 
 static void run_frame(A26Wii *w)
@@ -500,9 +573,14 @@ void atari2600_run(Atari2600State *s, const MosConfig *cfg)
 
     u64 t0 = gettime();
     uint64_t emu_cycles = 0;          /* emulated since t0, when there is no audio */
+    u32 retrace = wii_video_retraces();
 
     for (;;) {
         u64 l0 = gettime();
+        u32 now = wii_video_retraces();
+        int vblanks = (int)(now - retrace);
+        retrace = now;
+        if (vblanks < 1) vblanks = 1;
         WiiInput in = wii_input_poll(true);
         w->poll_us = (uint32_t)ticks_to_microsecs(diff_ticks(l0, gettime()));
         WiiExit sys = wii_system_exit_requested();
@@ -513,6 +591,7 @@ void atari2600_run(Atari2600State *s, const MosConfig *cfg)
             WiiExit leave = wii_menubar_open(menubar);
             if (leave != WII_EXIT_NONE) { wii_request_exit(leave); break; }
             t0 = gettime(); emu_cycles = 0;
+            retrace = wii_video_retraces();
             continue;
         }
 
@@ -524,7 +603,7 @@ void atari2600_run(Atari2600State *s, const MosConfig *cfg)
         if (!paused) {
             handle_input(s);
             w->n_run = 0;
-            int want = s->tia.sound.dev ? frames_wanted(s) : MAX_FRAMES_PER_VBLANK;
+            int want = s->tia.sound.dev ? frames_wanted(w, vblanks) : MAX_FRAMES_PER_PASS;
             for (int n = 0; n < want; n++) {
                 if (!s->tia.sound.dev) {
                     uint64_t real_us = ticks_to_microsecs(diff_ticks(t0, gettime()));
@@ -537,12 +616,26 @@ void atari2600_run(Atari2600State *s, const MosConfig *cfg)
             }
         }
 
+        w->last_run = paused ? 0 : w->n_run;
         w->paused_view = wii_menubar_paused(menubar);
+        const bool direct = can_draw_direct(w);
         u64 d0 = gettime();
-        draw_game(w);
+        if (direct) draw_direct(w);
+        else        draw_game(w);
         w->draw_us = (uint32_t)ticks_to_microsecs(diff_ticks(d0, gettime()));
         u64 p0 = gettime();
-        wii_video_present();
+        if (!direct) {
+            wii_video_present();
+        } else {
+#ifdef GEMU_WII_AUTOTEST
+            const int H = wii_video_height();
+            wii_video_fill(0, H - OVERLAY_Y, wii_video_width(), OVERLAY_Y - 20, WII_COL_BLACK);
+            draw_overlay(w);
+            wii_video_present_direct(H - OVERLAY_Y, H - 20);
+#else
+            wii_video_present_direct(0, 0);
+#endif
+        }
         w->present_us = (uint32_t)ticks_to_microsecs(diff_ticks(p0, gettime()));
         w->loop_us = (uint32_t)ticks_to_microsecs(diff_ticks(l0, gettime()));
         if (!paused) {
