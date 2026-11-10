@@ -65,6 +65,11 @@ void wii_netplay_set_game(const char *game)
     if (np) netplay_set_game(np, cur_game);
 }
 
+void wii_netplay_shutdown(void)
+{
+    if (np) netplay_disconnect(np);    /* sends USER_QUIT, ends the session thread */
+}
+
 static uint32_t now_ms(void) { return (uint32_t)ticks_to_millisecs(gettime()); }
 
 /* ── The network (net_init takes a few seconds: in the background) ─────── */

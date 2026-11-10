@@ -1,4 +1,7 @@
 #include "gemu/wii.h"
+#ifdef GEMU_NETPLAY
+#include "gemu/netplay_wii.h"
+#endif
 #include "gemu/video_wii.h"
 #include "gemu/input_wii.h"
 #include "gemu/audio_wii.h"
@@ -56,6 +59,9 @@ void wii_init(int argc, char **argv)
 
 void wii_shutdown(WiiExit why)
 {
+#ifdef GEMU_NETPLAY
+    wii_netplay_shutdown();
+#endif
     wii_audio_shutdown();
 #ifdef HW_RVL
     if (why == WII_EXIT_POWEROFF)
